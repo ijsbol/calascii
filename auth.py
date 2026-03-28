@@ -88,6 +88,17 @@ async def upsert_user(
             )
 
 
+async def update_username(discord_id: str, username: str) -> None:
+    if _pool is None:
+        raise RuntimeError("Database not yet available")
+    async with _pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "UPDATE users SET username = %s, updated_at = CURRENT_TIMESTAMP WHERE discord_id = %s",
+                (username, discord_id),
+            )
+
+
 def create_jwt(discord_id: str, username: str) -> str:
     now = int(time.time())
     payload = {
