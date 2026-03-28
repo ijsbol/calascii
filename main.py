@@ -340,6 +340,37 @@ async def me(request: Request):
     })
 
 
+@app.post("/auth/username")
+async def change_username(request: Request):
+    token = request.cookies.get("session")
+    if not token:
+        return JSONResponse({"error": "not authenticated"}, status_code=401)
+    payload = auth.decode_jwt(token)
+    if not payload:
+        return JSONResponse({"error": "not authenticated"}, status_code=401)
+
+    body = await request.json()
+    new_username = body.get("username", "").strip()
+    if not new_username or len(new_username) > 32:
+        return JSONResponse({"error": "invalid username"}, status_code=400)
+
+    try:
+        await auth.update_username(payload["sub"], new_username)
+    except RuntimeError:
+        pass
+
+    new_token = auth.create_jwt(discord_id=payload["sub"], username=new_username)
+    response = JSONResponse({"username": new_username})
+    response.set_cookie(
+        "session",
+        new_token,
+        max_age=auth.JWT_EXPIRY_SECONDS,
+        httponly=True,
+        samesite="lax",
+    )
+    return response
+
+
 @app.get("/")
 async def root():
     return FileResponse(Path(__file__).parent / "static" / "index.html")

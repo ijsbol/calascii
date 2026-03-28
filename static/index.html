@@ -40,6 +40,23 @@
         transition: color 0.2s;
       }
       #hud-auth a:hover { color: #6a8aaa; }
+      #hud-username {
+        cursor: pointer;
+        transition: color 0.2s;
+      }
+      #hud-username:hover { color: #6a8aaa; }
+      #hud-auth input {
+        font-family: "Courier New", monospace;
+        font-size: 11px;
+        color: #4a6080;
+        background: transparent;
+        border: none;
+        border-bottom: 1px solid #2a3a50;
+        outline: none;
+        letter-spacing: 1px;
+        width: 120px;
+        padding: 0;
+      }
 
       #auth-modal {
         position: fixed;
@@ -224,6 +241,43 @@
         return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
       }
 
+      function renderUsername(name) {
+        hudAuth.innerHTML = `<span id="hud-username">${escapeHtml(name)}</span> &nbsp; <a href="/auth/logout">logout</a>`;
+        document.getElementById('hud-username').addEventListener('click', () => startUsernameEdit(name));
+      }
+
+      function startUsernameEdit(current) {
+        let committed = false;
+        hudAuth.innerHTML = `<input id="hud-username-input" type="text" value="${escapeHtml(current)}" maxlength="32" spellcheck="false" autocomplete="off"> &nbsp; <a href="/auth/logout">logout</a>`;
+        const input = document.getElementById('hud-username-input');
+        input.focus();
+        input.select();
+
+        async function commit(name) {
+          if (committed) return;
+          committed = true;
+          if (!name || name === current) { renderUsername(current); return; }
+          try {
+            const resp = await fetch('/auth/username', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ username: name }),
+            });
+            const data = await resp.json();
+            renderUsername(resp.ok ? data.username : current);
+          } catch {
+            renderUsername(current);
+          }
+        }
+
+        input.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') { e.preventDefault(); commit(input.value.trim()); }
+          if (e.key === 'Escape') { committed = true; renderUsername(current); e.preventDefault(); }
+          e.stopPropagation();
+        });
+        input.addEventListener('blur', () => commit(input.value.trim()));
+      }
+
       async function checkAuth() {
         try {
           const resp = await fetch('/auth/me');
@@ -232,7 +286,7 @@
           if (data.no_auth) {
             hudAuth.style.display = 'none';
           } else if (isAuthenticated) {
-            hudAuth.innerHTML = `${escapeHtml(data.username)} &nbsp; <a href="/auth/logout">logout</a>`;
+            renderUsername(data.username);
           } else {
             hudAuth.innerHTML = `<a href="/auth/discord/login">login</a>`;
           }
