@@ -229,7 +229,9 @@
           const resp = await fetch('/auth/me');
           const data = await resp.json();
           isAuthenticated = data.authenticated;
-          if (isAuthenticated) {
+          if (data.no_auth) {
+            hudAuth.style.display = 'none';
+          } else if (isAuthenticated) {
             hudAuth.innerHTML = `${escapeHtml(data.username)} &nbsp; <a href="/auth/logout">logout</a>`;
           } else {
             hudAuth.innerHTML = `<a href="/auth/discord/login">login</a>`;

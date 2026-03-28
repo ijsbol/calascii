@@ -23,6 +23,8 @@ DISCORD_REDIRECT_URI: str = os.environ.get(
     "DISCORD_REDIRECT_URI", "http://localhost:1984/auth/discord/callback"
 )
 
+NO_AUTH: bool = os.environ.get("NO_AUTH", "").lower() in ("1", "true", "yes")
+
 DB_HOST: str = os.environ.get("DB_HOST", "localhost")
 DB_PORT: int = int(os.environ.get("DB_PORT", "3306"))
 DB_USER: str = os.environ["DB_USER"]

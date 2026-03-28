@@ -170,7 +170,7 @@ app = CalasciiRouter(
 
 async def process_message(message: Message, websocket: WebSocket) -> None:
     if message["type"] == "set":
-        if app.client_users.get(websocket) is None:
+        if not auth.NO_AUTH and app.client_users.get(websocket) is None:
             return
         if (
             app.connected_clients.get(websocket) is None
@@ -326,6 +326,8 @@ async def logout():
 
 @app.get("/auth/me")
 async def me(request: Request):
+    if auth.NO_AUTH:
+        return JSONResponse({"authenticated": True, "no_auth": True})
     token = request.cookies.get("session")
     if not token:
         return JSONResponse({"authenticated": False})
