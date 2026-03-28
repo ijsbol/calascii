@@ -425,9 +425,9 @@
             chunks.set(`${msg.g_x},${msg.g_y}`, msg.data);
           } else if (msg.type === 'welcome') {
             myId = msg.id;
-            for (const c of msg.cursors) otherCursors.set(c.id, { wx: c.wx, wy: c.wy });
+            for (const c of msg.cursors) otherCursors.set(c.id, { wx: c.wx, wy: c.wy, username: c.username });
           } else if (msg.type === 'cursor_update') {
-            if (msg.id !== myId) otherCursors.set(msg.id, { wx: msg.wx, wy: msg.wy });
+            if (msg.id !== myId) otherCursors.set(msg.id, { wx: msg.wx, wy: msg.wy, username: msg.username });
           } else if (msg.type === 'cursor_remove') {
             otherCursors.delete(msg.id);
           }
@@ -509,7 +509,7 @@
             ctx.textBaseline = 'bottom';
           }
           ctx.fillStyle = solid;
-          ctx.fillText(id.slice(0, 6), cx + cellW / 2, cy - 1);
+          ctx.fillText(pos.username || id.slice(0, 6), cx + cellW / 2, cy - 1);
         }
 
         if (cursor) {

@@ -64,6 +64,7 @@ class CalasciiRouter(FastAPI):
     connected_clients: dict[WebSocket, list[tuple[int, int]]] = {}
     client_ids: dict[WebSocket, str] = {}
     client_users: dict[WebSocket, dict | None] = {}
+    id_to_username: dict[str, str] = {}
     cursors: dict[str, tuple[int, int] | None] = {}
     data: CalasciiData = CalasciiData()
     pending_chunks: set[tuple[int, int]] = set()
@@ -147,6 +148,7 @@ async def _broadcast_loop() -> None:
                         "id": client_id,
                         "wx": wx,
                         "wy": wy,
+                        "username": app.id_to_username.get(client_id, client_id[:6]),
                     })
 
 
@@ -229,16 +231,18 @@ async def websocket_endpoint(websocket: WebSocket):
     user_payload = auth.decode_jwt(token) if token else None
 
     client_id = str(uuid.uuid4())
+    username = user_payload["username"] if user_payload else client_id[:6]
     app.connected_clients[websocket] = []
     app.client_ids[websocket] = client_id
     app.client_users[websocket] = user_payload
+    app.id_to_username[client_id] = username
     app.cursors[client_id] = None
 
     await websocket.send_json({
         "type": "welcome",
         "id": client_id,
         "cursors": [
-            {"id": cid, "wx": pos[0], "wy": pos[1]}
+            {"id": cid, "wx": pos[0], "wy": pos[1], "username": app.id_to_username.get(cid, cid[:6])}
             for cid, pos in app.cursors.items()
             if cid != client_id and pos is not None
         ],
@@ -252,6 +256,7 @@ async def websocket_endpoint(websocket: WebSocket):
         del app.connected_clients[websocket]
         del app.client_ids[websocket]
         del app.client_users[websocket]
+        del app.id_to_username[client_id]
         del app.cursors[client_id]
         app.pending_cursor_removes.add(client_id)
         app.pending_cursor_updates.pop(client_id, None)
