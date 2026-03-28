@@ -1,12 +1,15 @@
 import asyncio
 import json
+import secrets
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Final, Literal, TypedDict
 
+import auth
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.requests import Request
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
 
 __all__: tuple[str, ...] = ()
@@ -60,6 +63,7 @@ class CalasciiData:
 class CalasciiRouter(FastAPI):
     connected_clients: dict[WebSocket, list[tuple[int, int]]] = {}
     client_ids: dict[WebSocket, str] = {}
+    client_users: dict[WebSocket, dict | None] = {}
     cursors: dict[str, tuple[int, int] | None] = {}
     data: CalasciiData = CalasciiData()
     pending_chunks: set[tuple[int, int]] = set()
@@ -148,6 +152,7 @@ async def _broadcast_loop() -> None:
 
 @asynccontextmanager
 async def lifecycle(app: CalasciiRouter):
+    asyncio.create_task(auth.init_db())
     app.data.load(SAVE_PATH)
     save_task = asyncio.create_task(_save_loop())
     broadcast_task = asyncio.create_task(_broadcast_loop())
@@ -155,6 +160,7 @@ async def lifecycle(app: CalasciiRouter):
     save_task.cancel()
     broadcast_task.cancel()
     app.data.save(SAVE_PATH)
+    await auth.close_db()
 
 
 app = CalasciiRouter(
@@ -164,6 +170,8 @@ app = CalasciiRouter(
 
 async def process_message(message: Message, websocket: WebSocket) -> None:
     if message["type"] == "set":
+        if app.client_users.get(websocket) is None:
+            return
         if (
             app.connected_clients.get(websocket) is None
             or (message["g_x"], message["g_y"]) not in app.connected_clients[websocket]
@@ -216,9 +224,14 @@ async def process_message(message: Message, websocket: WebSocket) -> None:
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
+
+    token = websocket.cookies.get("session")
+    user_payload = auth.decode_jwt(token) if token else None
+
     client_id = str(uuid.uuid4())
     app.connected_clients[websocket] = []
     app.client_ids[websocket] = client_id
+    app.client_users[websocket] = user_payload
     app.cursors[client_id] = None
 
     await websocket.send_json({
@@ -238,9 +251,91 @@ async def websocket_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         del app.connected_clients[websocket]
         del app.client_ids[websocket]
+        del app.client_users[websocket]
         del app.cursors[client_id]
         app.pending_cursor_removes.add(client_id)
         app.pending_cursor_updates.pop(client_id, None)
+
+
+@app.get("/auth/discord/login")
+async def discord_login():
+    state = secrets.token_urlsafe(32)
+    url = auth.make_discord_auth_url(state)
+    response = RedirectResponse(url)
+    response.set_cookie("oauth_state", state, max_age=600, httponly=True, samesite="lax")
+    return response
+
+
+@app.get("/auth/discord/callback")
+async def discord_callback(
+    request: Request,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+):
+    stored_state = request.cookies.get("oauth_state")
+    if error or not code or not state or not stored_state or stored_state != state:
+        response = RedirectResponse("/")
+        response.delete_cookie("oauth_state")
+        return response
+
+    token_data = await auth.exchange_code(code)
+    if not token_data or "access_token" not in token_data:
+        response = RedirectResponse("/")
+        response.delete_cookie("oauth_state")
+        return response
+
+    user_data = await auth.get_discord_user(token_data["access_token"])
+    if not user_data:
+        response = RedirectResponse("/")
+        response.delete_cookie("oauth_state")
+        return response
+
+    try:
+        await auth.upsert_user(
+            discord_id=user_data["id"],
+            username=user_data["username"],
+            global_name=user_data.get("global_name"),
+        )
+    except RuntimeError:
+        pass  # DB not yet ready; proceed without recording the user
+
+    jwt_token = auth.create_jwt(
+        discord_id=user_data["id"],
+        username=user_data["username"],
+    )
+
+    response = RedirectResponse("/")
+    response.delete_cookie("oauth_state")
+    response.set_cookie(
+        "session",
+        jwt_token,
+        max_age=auth.JWT_EXPIRY_SECONDS,
+        httponly=True,
+        samesite="lax",
+    )
+    return response
+
+
+@app.get("/auth/logout")
+async def logout():
+    response = RedirectResponse("/")
+    response.delete_cookie("session")
+    return response
+
+
+@app.get("/auth/me")
+async def me(request: Request):
+    token = request.cookies.get("session")
+    if not token:
+        return JSONResponse({"authenticated": False})
+    payload = auth.decode_jwt(token)
+    if not payload:
+        return JSONResponse({"authenticated": False})
+    return JSONResponse({
+        "authenticated": True,
+        "username": payload["username"],
+    })
 
 
 @app.get("/")
