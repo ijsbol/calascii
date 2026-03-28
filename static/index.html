@@ -188,8 +188,10 @@
 
       let cursor = null;  // { wx, wy }
       let cursorOn = true;
+      let selection = null; // { start: {wx, wy}, end: {wx, wy} }
 
       let dragging = false;
+      let selecting = false;
       let dragStartX = 0, dragStartY = 0;
       let dragBaseOffX = 0, dragBaseOffY = 0;
       let dragMoved = false;
@@ -484,6 +486,22 @@
           const { wx, wy } = screenToWorld(logW / 2, logH / 2);
           hudCoords.textContent = `${wx}, ${wy}`;
         }
+
+        if (selection) {
+          const wx0 = Math.min(selection.start.wx, selection.end.wx);
+          const wy0 = Math.min(selection.start.wy, selection.end.wy);
+          const wx1 = Math.max(selection.start.wx, selection.end.wx);
+          const wy1 = Math.max(selection.start.wy, selection.end.wy);
+          const sx = wx0 * cellW + offsetX;
+          const sy = wy0 * cellH + offsetY;
+          const sw = (wx1 - wx0 + 1) * cellW;
+          const sh = (wy1 - wy0 + 1) * cellH;
+          ctx.fillStyle = 'rgba(37,99,235,0.15)';
+          ctx.fillRect(sx, sy, sw, sh);
+          ctx.strokeStyle = '#2563eb';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(sx + 0.5, sy + 0.5, sw - 1, sh - 1);
+        }
       }
 
       let blinkTimer = null;
@@ -503,6 +521,22 @@
         if (sx > logW - (margin + 1) * cellW) offsetX -= sx - (logW - (margin + 1) * cellW);
         if (sy > logH - (margin + 1) * cellH) offsetY -= sy - (logH - (margin + 1) * cellH);
         loadVisibleChunks();
+      }
+
+      function moveCursorToBounded(wx, wy) {
+        if (selection) {
+          const x0 = Math.min(selection.start.wx, selection.end.wx);
+          const y0 = Math.min(selection.start.wy, selection.end.wy);
+          const x1 = Math.max(selection.start.wx, selection.end.wx);
+          const y1 = Math.max(selection.start.wy, selection.end.wy);
+          if (wx < x0) { wx = x1; wy = wy - 1; }
+          if (wx > x1) { wx = x0; wy = wy + 1; }
+          wy = wy < y0 ? y1 : wy > y1 ? y0 : wy;
+        }
+        cursor = { wx, wy };
+        resetBlink();
+        ensureCursorVisible();
+        sendCursorMove(wx, wy);
       }
 
       window.addEventListener('keydown', (e) => {
@@ -532,11 +566,11 @@
         if (!cursor) return;
 
         switch (e.key) {
-          case 'ArrowLeft':  cursor = { wx: cursor.wx - 1, wy: cursor.wy }; break;
-          case 'ArrowRight': cursor = { wx: cursor.wx + 1, wy: cursor.wy }; break;
-          case 'ArrowUp':    cursor = { wx: cursor.wx, wy: cursor.wy - 1 }; break;
-          case 'ArrowDown':  cursor = { wx: cursor.wx, wy: cursor.wy + 1 }; break;
-          case 'Enter':      cursor = { wx: cursor.wx, wy: cursor.wy + 1 }; break;
+          case 'ArrowLeft':  moveCursorToBounded(cursor.wx - 1, cursor.wy); break;
+          case 'ArrowRight': moveCursorToBounded(cursor.wx + 1, cursor.wy); break;
+          case 'ArrowUp':    moveCursorToBounded(cursor.wx, cursor.wy - 1); break;
+          case 'ArrowDown':  moveCursorToBounded(cursor.wx, cursor.wy + 1); break;
+          case 'Enter':      moveCursorToBounded(cursor.wx, cursor.wy + 1); break;
           case 'Escape':
             cursor = null;
             sendCursorClear();
@@ -545,7 +579,7 @@
             return;
           case 'Backspace':
             sendSet(cursor.wx, cursor.wy, '');
-            cursor = { wx: cursor.wx - 1, wy: cursor.wy };
+            moveCursorToBounded(cursor.wx - 1, cursor.wy);
             break;
           case 'Delete':
             sendSet(cursor.wx, cursor.wy, '');
@@ -553,10 +587,7 @@
           default:
             if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
               sendSet(cursor.wx, cursor.wy, e.key);
-              cursor = { wx: cursor.wx + 1, wy: cursor.wy };
-              resetBlink();
-              ensureCursorVisible();
-              sendCursorMove(cursor.wx, cursor.wy);
+              moveCursorToBounded(cursor.wx + 1, cursor.wy);
               e.preventDefault();
             }
             return;
@@ -576,14 +607,14 @@
             cursor = { wx: cursor.wx + 1, wy: cursor.wy };
           }
         }
-        resetBlink();
-        ensureCursorVisible();
-        sendCursorMove(cursor.wx, cursor.wy);
+        moveCursorToBounded(cursor.wx, cursor.wy);
         mobileInput.value = '';
       });
 
-      function pointerDown(px, py) {
+      function pointerDown(px, py, select = false) {
         dragging = true;
+        selection = null;
+        if (select) selecting = true;
         dragMoved = false;
         dragStartX = px;
         dragStartY = py;
@@ -593,19 +624,34 @@
 
       function pointerMove(px, py) {
         if (!dragging) return;
-        const dx = px - dragStartX, dy = py - dragStartY;
-        if (Math.abs(dx) > 4 || Math.abs(dy) > 4) dragMoved = true;
-        offsetX = dragBaseOffX + dx;
-        offsetY = dragBaseOffY + dy;
+        if (selecting) {
+          const { wx, wy } = screenToWorld(px, py);
+          if (!selection) {
+            selection = { start: { wx, wy }, end: { wx, wy } };
+          } else {
+            selection.end = { wx, wy };
+          }
+        } else {
+          const dx = px - dragStartX, dy = py - dragStartY;
+          if (Math.abs(dx) > 4 || Math.abs(dy) > 4) dragMoved = true;
+          offsetX = dragBaseOffX + dx;
+          offsetY = dragBaseOffY + dy;
+        }
         loadVisibleChunks();
       }
 
       function pointerUp(px, py) {
         if (!dragging) return;
         dragging = false;
+        selecting = false;
         if (!dragMoved) {
-          // Treat as click → place cursor
-          const { wx, wy } = screenToWorld(px, py);
+          if (selection) {
+            const a = selection.start, b = selection.end;
+            selection.start = { wx: Math.min(a.wx, b.wx), wy: Math.min(a.wy, b.wy) };
+            selection.end = { wx: Math.max(a.wx, b.wx), wy: Math.max(a.wy, b.wy) };
+          }
+          // Treat as click → place cursor or move to new selection start
+          const { wx, wy } = selection ? selection.start : screenToWorld(px, py);
           cursor = { wx, wy };
           const { gx, gy } = worldToChunk(wx, wy);
           requestChunk(gx, gy);
@@ -617,7 +663,7 @@
       }
 
       canvas.addEventListener('mousedown', (e) => {
-        pointerDown(e.clientX, e.clientY);
+        pointerDown(e.clientX, e.clientY, e.shiftKey);
         canvas.style.cursor = 'grabbing';
         e.preventDefault();
       });
@@ -640,7 +686,7 @@
 
       canvas.addEventListener('touchstart', (e) => {
         if (e.touches.length === 1) {
-          pointerDown(e.touches[0].clientX, e.touches[0].clientY);
+          pointerDown(e.touches[0].clientX, e.touches[0].clientY, e.shiftKey);
         } else if (e.touches.length === 2) {
           dragging = false;
           const dx = e.touches[1].clientX - e.touches[0].clientX;
