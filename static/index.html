@@ -137,7 +137,7 @@
       }
 
       function zoomMin() { return logW / (10 * CHUNK_SIZE * BASE_CELL_W); }
-      function zoomMax() { return logW / (5 * BASE_CELL_W); }
+      function zoomMax() { return logW / (CHUNK_SIZE * BASE_CELL_W); }
 
       function applyZoom(newZoom, pivotX = logW / 2, pivotY = logH / 2) {
         newZoom = Math.max(zoomMin(), Math.min(zoomMax(), newZoom));
