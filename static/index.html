@@ -32,6 +32,75 @@
       #hud-status.connected { color: #2d6a4a; }
       #hud-status.disconnected { color: #6a2d2d; }
 
+      #hud-auth { pointer-events: auto; }
+      #hud-auth a {
+        color: #3d4a5c;
+        text-decoration: none;
+        letter-spacing: 1px;
+        transition: color 0.2s;
+      }
+      #hud-auth a:hover { color: #6a8aaa; }
+
+      #auth-modal {
+        position: fixed;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        background: rgba(13, 13, 13, 0.8);
+        z-index: 100;
+        font-family: "Courier New", monospace;
+      }
+      #auth-modal-box {
+        border: 1px solid #1e2a38;
+        background: #0d0d0d;
+        padding: 28px 32px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        min-width: 260px;
+      }
+      #auth-modal-title {
+        color: #4a6080;
+        font-size: 13px;
+        letter-spacing: 2px;
+      }
+      #auth-modal-text {
+        color: #3d4a5c;
+        font-size: 11px;
+        letter-spacing: 1px;
+        line-height: 1.6;
+      }
+      #auth-modal-actions {
+        display: flex;
+        gap: 16px;
+        align-items: center;
+        margin-top: 4px;
+      }
+      #auth-modal-login {
+        font-family: "Courier New", monospace;
+        font-size: 11px;
+        color: #4a6080;
+        text-decoration: none;
+        letter-spacing: 1px;
+        border: 1px solid #1e2a38;
+        padding: 5px 10px;
+        transition: color 0.2s, border-color 0.2s;
+      }
+      #auth-modal-login:hover { color: #6a8aaa; border-color: #3a5070; }
+      #auth-modal-dismiss {
+        font-family: "Courier New", monospace;
+        font-size: 11px;
+        color: #2d3a4a;
+        background: transparent;
+        border: none;
+        padding: 0;
+        cursor: pointer;
+        letter-spacing: 1px;
+        transition: color 0.2s;
+      }
+      #auth-modal-dismiss:hover { color: #3d4a5c; }
+
       .corner-btn {
         font-family: "Courier New", monospace;
         font-size: 11px;
@@ -70,6 +139,16 @@
       <button id="zoom-out" class="corner-btn">-</button>
       <button id="zoom-in" class="corner-btn">+</button>
     </div>
+    <div id="auth-modal" style="display:none">
+      <div id="auth-modal-box">
+        <div id="auth-modal-title">LOGIN REQUIRED</div>
+        <div id="auth-modal-text">you need to be logged in to edit tiles.</div>
+        <div id="auth-modal-actions">
+          <a href="/auth/discord/login" id="auth-modal-login">login with discord</a>
+          <button id="auth-modal-dismiss">dismiss</button>
+        </div>
+      </div>
+    </div>
     <div id="hud">
       <div id="hud-left">
         <div id="hud-title">CALASCII</div>
@@ -77,6 +156,7 @@
       </div>
       <div id="hud-right">
         <div id="hud-status" class="disconnected">connecting</div>
+        <div id="hud-auth"></div>
         <div id="hud-help">drag to pan &nbsp; click to place cursor &nbsp; type to write</div>
       </div>
     </div>
@@ -136,6 +216,47 @@
         return colorMap.get(id);
       }
 
+      let isAuthenticated = false;
+      const hudAuth = document.getElementById('hud-auth');
+      const authModal = document.getElementById('auth-modal');
+
+      function escapeHtml(str) {
+        return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+      }
+
+      async function checkAuth() {
+        try {
+          const resp = await fetch('/auth/me');
+          const data = await resp.json();
+          isAuthenticated = data.authenticated;
+          if (data.no_auth) {
+            hudAuth.style.display = 'none';
+          } else if (isAuthenticated) {
+            hudAuth.innerHTML = `${escapeHtml(data.username)} &nbsp; <a href="/auth/logout">logout</a>`;
+          } else {
+            hudAuth.innerHTML = `<a href="/auth/discord/login">login</a>`;
+          }
+        } catch {
+          hudAuth.innerHTML = `<a href="/auth/discord/login">login</a>`;
+        }
+      }
+
+      let authModalOpen = false;
+
+      function showAuthModal() {
+        authModalOpen = true;
+        authModal.style.display = 'flex';
+      }
+
+      function hideAuthModal() {
+        authModalOpen = false;
+        authModal.style.display = 'none';
+      }
+
+      authModal.addEventListener('click', (e) => { if (e.target === authModal) hideAuthModal(); });
+
+      document.getElementById('auth-modal-dismiss').addEventListener('click', hideAuthModal);
+
       function zoomMin() { return logW / (10 * CHUNK_SIZE * BASE_CELL_W); }
       function zoomMax() { return logW / (CHUNK_SIZE * BASE_CELL_W); }
 
@@ -180,6 +301,10 @@
       }
 
       function sendSet(wx, wy, ch) {
+        if (!isAuthenticated) {
+          showAuthModal();
+          return;
+        }
         const { gx, gy, sx, sy } = worldToChunk(wx, wy);
         const key = `${gx},${gy}`;
         if (!chunks.has(key)) {
@@ -381,6 +506,11 @@
       }
 
       window.addEventListener('keydown', (e) => {
+        if (authModalOpen) {
+          if (e.key === 'Escape') { hideAuthModal(); e.preventDefault(); }
+          return;
+        }
+
         if (e.ctrlKey || e.metaKey) {
           if (e.key === '=' || e.key === '+') {
             e.preventDefault();
@@ -591,6 +721,7 @@
       connect();
       resetBlink();
       loop();
+      checkAuth();
       </script>
     </body>
 </html>
