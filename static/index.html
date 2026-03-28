@@ -381,6 +381,24 @@
       }
 
       window.addEventListener('keydown', (e) => {
+        if (e.ctrlKey || e.metaKey) {
+          if (e.key === '=' || e.key === '+') {
+            e.preventDefault();
+            applyZoom(zoom * 1.25);
+            return;
+          }
+          if (e.key === '-') {
+            e.preventDefault();
+            applyZoom(zoom / 1.25);
+            return;
+          }
+          if (e.key === '0') {
+            e.preventDefault();
+            applyZoom(1.0);
+            return;
+          }
+        }
+
         if (!cursor) return;
 
         switch (e.key) {
