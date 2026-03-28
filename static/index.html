@@ -155,6 +155,15 @@
       }
 
       function connect() {
+        let params = new URLSearchParams(document.location.search);
+        let gx = params.get("gx", null);
+        let gy = params.get("gy", null);
+        if (gx !== null && gy !== null) {
+          gx = parseInt(gx);
+          gy = parseInt(gy);
+          offsetX = -gx * CHUNK_SIZE * CELL_W + logW / 2;
+          offsetY = -gy * CHUNK_SIZE * CELL_H + logH / 2;
+        }
         const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
         ws = new WebSocket(`${proto}//${location.host}/ws`);
 
