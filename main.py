@@ -249,5 +249,16 @@ async def root():
 
 
 if __name__ == "__main__":
+    import os
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=1984)
+
+    ssl_certfile = os.environ.get("SSL_CERTFILE")
+    ssl_keyfile = os.environ.get("SSL_KEYFILE")
+
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=1984,
+        ssl_certfile=ssl_certfile,
+        ssl_keyfile=ssl_keyfile,
+    )
