@@ -1,4 +1,5 @@
 import os
+import random
 import time
 from urllib.parse import urlencode
 
@@ -24,6 +25,11 @@ DISCORD_REDIRECT_URI: str = os.environ.get(
 )
 
 NO_AUTH: bool = os.environ.get("NO_AUTH", "").lower() in ("1", "true", "yes")
+
+CURSOR_COLORS: list[str] = [
+    "#ef4444", "#f97316", "#eab308",
+    "#22c55e", "#06b6d4", "#a855f7", "#ec4899",
+]
 
 DB_HOST: str = os.environ.get("DB_HOST", "localhost")
 DB_PORT: int = int(os.environ.get("DB_PORT", "3306"))
@@ -52,10 +58,36 @@ async def init_db() -> None:
                     discord_id VARCHAR(64) PRIMARY KEY,
                     username VARCHAR(100) NOT NULL,
                     global_name VARCHAR(100),
+                    cursor_color VARCHAR(7) NOT NULL DEFAULT '#ef4444',
                     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
                 )
             """)
+            await cur.execute("""
+                CREATE TABLE IF NOT EXISTS _migrations (
+                    name VARCHAR(100) PRIMARY KEY,
+                    applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            # Migration 001: add cursor_color to pre-existing installs
+            await cur.execute(
+                "SELECT 1 FROM _migrations WHERE name = '001_add_cursor_color'"
+            )
+            if not await cur.fetchone():
+                await cur.execute("""
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = DATABASE()
+                    AND table_name = 'users'
+                    AND column_name = 'cursor_color'
+                """)
+                if not await cur.fetchone():
+                    await cur.execute(
+                        "ALTER TABLE users ADD COLUMN cursor_color VARCHAR(7)"
+                        " NOT NULL DEFAULT '#ef4444'"
+                    )
+                await cur.execute(
+                    "INSERT INTO _migrations (name) VALUES ('001_add_cursor_color')"
+                )
 
 
 async def close_db() -> None:
@@ -70,22 +102,29 @@ async def upsert_user(
     discord_id: str,
     username: str,
     global_name: str | None,
-) -> None:
+) -> str:
+    """Insert or update user, returning their cursor_color."""
     if _pool is None:
         raise RuntimeError("Database not yet available")
     async with _pool.acquire() as conn:
         async with conn.cursor() as cur:
+            color = random.choice(CURSOR_COLORS)
             await cur.execute(
                 """
-                INSERT INTO users (discord_id, username, global_name)
-                VALUES (%s, %s, %s)
+                INSERT INTO users (discord_id, username, global_name, cursor_color)
+                VALUES (%s, %s, %s, %s)
                 ON DUPLICATE KEY UPDATE
                     username = VALUES(username),
                     global_name = VALUES(global_name),
                     updated_at = CURRENT_TIMESTAMP
                 """,
-                (discord_id, username, global_name),
+                (discord_id, username, global_name, color),
             )
+            await cur.execute(
+                "SELECT cursor_color FROM users WHERE discord_id = %s", (discord_id,)
+            )
+            row = await cur.fetchone()
+            return row[0] if row else color
 
 
 async def update_username(discord_id: str, username: str) -> None:
@@ -99,11 +138,23 @@ async def update_username(discord_id: str, username: str) -> None:
             )
 
 
-def create_jwt(discord_id: str, username: str) -> str:
+async def update_cursor_color(discord_id: str, color: str) -> None:
+    if _pool is None:
+        raise RuntimeError("Database not yet available")
+    async with _pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "UPDATE users SET cursor_color = %s, updated_at = CURRENT_TIMESTAMP WHERE discord_id = %s",
+                (color, discord_id),
+            )
+
+
+def create_jwt(discord_id: str, username: str, cursor_color: str) -> str:
     now = int(time.time())
     payload = {
         "sub": discord_id,
         "username": username,
+        "cursor_color": cursor_color,
         "iat": now,
         "exp": now + JWT_EXPIRY_SECONDS,
     }
