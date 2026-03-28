@@ -32,10 +32,7 @@
       #hud-status.connected { color: #2d6a4a; }
       #hud-status.disconnected { color: #6a2d2d; }
 
-      #share-btn {
-        position: fixed;
-        bottom: 14px;
-        right: 14px;
+      .corner-btn {
         font-family: "Courier New", monospace;
         font-size: 11px;
         color: #3d4a5c;
@@ -47,14 +44,32 @@
         transition: color 0.2s, border-color 0.2s;
         user-select: none;
       }
-      #share-btn:hover { color: #6a8aaa; border-color: #3a5070; }
+      .corner-btn:hover { color: #6a8aaa; border-color: #3a5070; }
+
+      #share-btn {
+        position: fixed;
+        bottom: 14px;
+        right: 14px;
+      }
       #share-btn.copied { color: #2d6a4a; border-color: #2d6a4a; }
+
+      #zoom-controls {
+        position: fixed;
+        bottom: 14px;
+        left: 14px;
+        display: flex;
+        gap: 4px;
+      }
     </style>
   </head>
   <body>
     <canvas id="canvas"></canvas>
     <input id="mobile-input" type="text" inputmode="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" style="position:fixed;opacity:0;top:-100px;left:0;width:1px;height:1px;pointer-events:none;" />
-    <button id="share-btn">share</button>
+    <button id="share-btn" class="corner-btn">share</button>
+    <div id="zoom-controls">
+      <button id="zoom-out" class="corner-btn">-</button>
+      <button id="zoom-in" class="corner-btn">+</button>
+    </div>
     <div id="hud">
       <div id="hud-left">
         <div id="hud-title">CALASCII</div>
@@ -68,9 +83,8 @@
 
     <script>
       const CHUNK_SIZE = 50;
-      const CELL_W = 12;
-      const CELL_H = 18;
-      const FONT = '13px "Courier New", Courier, monospace';
+      const BASE_CELL_W = 12;
+      const BASE_CELL_H = 18;
 
       const canvas = document.getElementById('canvas');
       const ctx = canvas.getContext('2d');
@@ -81,6 +95,10 @@
 
       let logW = window.innerWidth;
       let logH = window.innerHeight;
+
+      let zoom = 1.0;
+      let cellW = BASE_CELL_W;
+      let cellH = BASE_CELL_H;
 
       const chunks = new Map();       // "gx,gy" -> data[sx][sy] (from server)
       const requested = new Set();    // "gx,gy" chunks already sent a get for
@@ -95,6 +113,8 @@
       let dragStartX = 0, dragStartY = 0;
       let dragBaseOffX = 0, dragBaseOffY = 0;
       let dragMoved = false;
+
+      let pinchDist = null;
 
       let ws = null;
 
@@ -116,6 +136,21 @@
         return colorMap.get(id);
       }
 
+      function zoomMin() { return logW / (10 * CHUNK_SIZE * BASE_CELL_W); }
+      function zoomMax() { return logW / (CHUNK_SIZE * BASE_CELL_W); }
+
+      function applyZoom(newZoom, pivotX = logW / 2, pivotY = logH / 2) {
+        newZoom = Math.max(zoomMin(), Math.min(zoomMax(), newZoom));
+        const worldX = (pivotX - offsetX) / cellW;
+        const worldY = (pivotY - offsetY) / cellH;
+        zoom = newZoom;
+        cellW = BASE_CELL_W * zoom;
+        cellH = BASE_CELL_H * zoom;
+        offsetX = pivotX - worldX * cellW;
+        offsetY = pivotY - worldY * cellH;
+        loadVisibleChunks();
+      }
+
       function worldToChunk(wx, wy) {
         const gx = Math.floor(wx / CHUNK_SIZE);
         const gy = Math.floor(wy / CHUNK_SIZE);
@@ -124,16 +159,16 @@
 
       function screenToWorld(px, py) {
         return {
-          wx: Math.floor((px - offsetX) / CELL_W),
-          wy: Math.floor((py - offsetY) / CELL_H),
+          wx: Math.floor((px - offsetX) / cellW),
+          wy: Math.floor((py - offsetY) / cellH),
         };
       }
 
       function visibleChunkRange() {
-        const x0 = Math.floor(Math.floor(-offsetX / CELL_W) / CHUNK_SIZE);
-        const y0 = Math.floor(Math.floor(-offsetY / CELL_H) / CHUNK_SIZE);
-        const x1 = Math.floor(Math.ceil((logW - offsetX) / CELL_W) / CHUNK_SIZE);
-        const y1 = Math.floor(Math.ceil((logH - offsetY) / CELL_H) / CHUNK_SIZE);
+        const x0 = Math.floor(Math.floor(-offsetX / cellW) / CHUNK_SIZE);
+        const y0 = Math.floor(Math.floor(-offsetY / cellH) / CHUNK_SIZE);
+        const x1 = Math.floor(Math.ceil((logW - offsetX) / cellW) / CHUNK_SIZE);
+        const y1 = Math.floor(Math.ceil((logH - offsetY) / cellH) / CHUNK_SIZE);
         return { x0, y0, x1, y1 };
       }
 
@@ -180,8 +215,8 @@
         if (gx !== null && gy !== null) {
           gx = parseInt(gx);
           gy = parseInt(gy);
-          offsetX = -gx * CHUNK_SIZE * CELL_W + logW / 2;
-          offsetY = -gy * CHUNK_SIZE * CELL_H + logH / 2;
+          offsetX = -gx * CHUNK_SIZE * cellW + logW / 2;
+          offsetY = -gy * CHUNK_SIZE * cellH + logH / 2;
         }
         const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
         ws = new WebSocket(`${proto}//${location.host}/ws`);
@@ -221,7 +256,8 @@
       }
 
       function render() {
-        const dpr = window.devicePixelRatio || 1;
+        const mainFont = `${Math.round(13 * zoom)}px "Courier New", Courier, monospace`;
+        const smallFont = `${Math.round(9 * zoom)}px "Courier New", monospace`;
 
         ctx.fillStyle = '#0d0d0d';
         ctx.fillRect(0, 0, logW, logH);
@@ -231,15 +267,15 @@
         ctx.strokeStyle = '#171f2a';
         ctx.lineWidth = 1;
         for (let gx = x0; gx <= x1 + 1; gx++) {
-          const x = Math.round(gx * CHUNK_SIZE * CELL_W + offsetX) + 0.5;
+          const x = Math.round(gx * CHUNK_SIZE * cellW + offsetX) + 0.5;
           ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, logH); ctx.stroke();
         }
         for (let gy = y0; gy <= y1 + 1; gy++) {
-          const y = Math.round(gy * CHUNK_SIZE * CELL_H + offsetY) + 0.5;
+          const y = Math.round(gy * CHUNK_SIZE * cellH + offsetY) + 0.5;
           ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(logW, y); ctx.stroke();
         }
 
-        ctx.font = FONT;
+        ctx.font = mainFont;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillStyle = '#c8c8c8';
@@ -250,73 +286,73 @@
             if (!data) continue;
             for (let sx = 0; sx < CHUNK_SIZE; sx++) {
               const wx = gx * CHUNK_SIZE + sx;
-              const screenX = wx * CELL_W + offsetX;
-              if (screenX + CELL_W < 0 || screenX > logW) continue;
+              const screenX = wx * cellW + offsetX;
+              if (screenX + cellW < 0 || screenX > logW) continue;
               const col = data[sx];
               if (!col) continue;
               for (let sy = 0; sy < CHUNK_SIZE; sy++) {
                 const ch = col[sy];
                 if (!ch) continue;
                 const wy = gy * CHUNK_SIZE + sy;
-                const screenY = wy * CELL_H + offsetY;
-                if (screenY + CELL_H < 0 || screenY > logH) continue;
-                ctx.fillText(ch, screenX + CELL_W / 2, screenY + CELL_H / 2);
+                const screenY = wy * cellH + offsetY;
+                if (screenY + cellH < 0 || screenY > logH) continue;
+                ctx.fillText(ch, screenX + cellW / 2, screenY + cellH / 2);
               }
             }
           }
         }
 
-        ctx.font = '9px "Courier New", monospace';
+        ctx.font = smallFont;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'bottom';
         for (const [id, pos] of otherCursors) {
-          const cx = pos.wx * CELL_W + offsetX;
-          const cy = pos.wy * CELL_H + offsetY;
-          if (cx + CELL_W < 0 || cx > logW || cy + CELL_H < 0 || cy > logH) continue;
+          const cx = pos.wx * cellW + offsetX;
+          const cy = pos.wy * cellH + offsetY;
+          if (cx + cellW < 0 || cx > logW || cy + cellH < 0 || cy > logH) continue;
           const [solid, faint] = getColor(id);
           ctx.fillStyle = faint;
-          ctx.fillRect(cx, cy, CELL_W, CELL_H);
+          ctx.fillRect(cx, cy, cellW, cellH);
           ctx.strokeStyle = solid;
           ctx.lineWidth = 1;
-          ctx.strokeRect(cx + 0.5, cy + 0.5, CELL_W - 1, CELL_H - 1);
+          ctx.strokeRect(cx + 0.5, cy + 0.5, cellW - 1, cellH - 1);
 
           const { gx, gy, sx, sy } = worldToChunk(pos.wx, pos.wy);
           const cdata = chunks.get(`${gx},${gy}`);
           const cch = cdata?.[sx]?.[sy] || '';
           if (cch) {
-            ctx.font = FONT;
+            ctx.font = mainFont;
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
             ctx.fillStyle = solid;
-            ctx.fillText(cch, cx + CELL_W / 2, cy + CELL_H / 2);
-            ctx.font = '9px "Courier New", monospace';
+            ctx.fillText(cch, cx + cellW / 2, cy + cellH / 2);
+            ctx.font = smallFont;
             ctx.textAlign = 'center';
             ctx.textBaseline = 'bottom';
           }
           ctx.fillStyle = solid;
-          ctx.fillText(id.slice(0, 6), cx + CELL_W / 2, cy - 1);
+          ctx.fillText(id.slice(0, 6), cx + cellW / 2, cy - 1);
         }
 
         if (cursor) {
-          const cx = cursor.wx * CELL_W + offsetX;
-          const cy = cursor.wy * CELL_H + offsetY;
+          const cx = cursor.wx * cellW + offsetX;
+          const cy = cursor.wy * cellH + offsetY;
           if (cursorOn) {
             ctx.fillStyle = '#2563eb';
-            ctx.fillRect(cx, cy, CELL_W, CELL_H);
+            ctx.fillRect(cx, cy, cellW, cellH);
           } else {
             ctx.strokeStyle = '#2563eb';
             ctx.lineWidth = 1;
-            ctx.strokeRect(cx + 0.5, cy + 0.5, CELL_W - 1, CELL_H - 1);
+            ctx.strokeRect(cx + 0.5, cy + 0.5, cellW - 1, cellH - 1);
           }
           const { gx, gy, sx, sy } = worldToChunk(cursor.wx, cursor.wy);
           const data = chunks.get(`${gx},${gy}`);
           const ch = data?.[sx]?.[sy] || '';
           if (ch) {
-            ctx.font = FONT;
+            ctx.font = mainFont;
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
             ctx.fillStyle = cursorOn ? '#fff' : '#c8c8c8';
-            ctx.fillText(ch, cx + CELL_W / 2, cy + CELL_H / 2);
+            ctx.fillText(ch, cx + cellW / 2, cy + cellH / 2);
           }
           hudCoords.textContent = `${cursor.wx}, ${cursor.wy}`;
         } else {
@@ -335,16 +371,34 @@
       function ensureCursorVisible() {
         if (!cursor) return;
         const margin = 3;
-        const sx = cursor.wx * CELL_W + offsetX;
-        const sy = cursor.wy * CELL_H + offsetY;
-        if (sx < margin * CELL_W)              offsetX += margin * CELL_W - sx;
-        if (sy < margin * CELL_H)              offsetY += margin * CELL_H - sy;
-        if (sx > logW - (margin + 1) * CELL_W) offsetX -= sx - (logW - (margin + 1) * CELL_W);
-        if (sy > logH - (margin + 1) * CELL_H) offsetY -= sy - (logH - (margin + 1) * CELL_H);
+        const sx = cursor.wx * cellW + offsetX;
+        const sy = cursor.wy * cellH + offsetY;
+        if (sx < margin * cellW)              offsetX += margin * cellW - sx;
+        if (sy < margin * cellH)              offsetY += margin * cellH - sy;
+        if (sx > logW - (margin + 1) * cellW) offsetX -= sx - (logW - (margin + 1) * cellW);
+        if (sy > logH - (margin + 1) * cellH) offsetY -= sy - (logH - (margin + 1) * cellH);
         loadVisibleChunks();
       }
 
       window.addEventListener('keydown', (e) => {
+        if (e.ctrlKey || e.metaKey) {
+          if (e.key === '=' || e.key === '+') {
+            e.preventDefault();
+            applyZoom(zoom * 1.25);
+            return;
+          }
+          if (e.key === '-') {
+            e.preventDefault();
+            applyZoom(zoom / 1.25);
+            return;
+          }
+          if (e.key === '0') {
+            e.preventDefault();
+            applyZoom(1.0);
+            return;
+          }
+        }
+
         if (!cursor) return;
 
         switch (e.key) {
@@ -440,16 +494,54 @@
       window.addEventListener('mousemove', (e) => pointerMove(e.clientX, e.clientY));
       window.addEventListener('mouseup',   (e) => pointerUp(e.clientX, e.clientY));
 
+      canvas.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        if (e.ctrlKey) {
+          // Pinch-to-zoom (touch pad pinch or Ctrl+scroll)
+          const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+          applyZoom(zoom * factor, e.clientX, e.clientY);
+        } else {
+          // Two-finger pan (touch pad scroll)
+          offsetX -= e.deltaX;
+          offsetY -= e.deltaY;
+          loadVisibleChunks();
+        }
+      }, { passive: false });
+
       canvas.addEventListener('touchstart', (e) => {
-        if (e.touches.length === 1) pointerDown(e.touches[0].clientX, e.touches[0].clientY);
+        if (e.touches.length === 1) {
+          pointerDown(e.touches[0].clientX, e.touches[0].clientY);
+        } else if (e.touches.length === 2) {
+          dragging = false;
+          const dx = e.touches[1].clientX - e.touches[0].clientX;
+          const dy = e.touches[1].clientY - e.touches[0].clientY;
+          pinchDist = Math.hypot(dx, dy);
+        }
         e.preventDefault();
       }, { passive: false });
       canvas.addEventListener('touchmove', (e) => {
-        if (e.touches.length === 1) pointerMove(e.touches[0].clientX, e.touches[0].clientY);
+        if (e.touches.length === 1 && pinchDist === null) {
+          pointerMove(e.touches[0].clientX, e.touches[0].clientY);
+        } else if (e.touches.length === 2 && pinchDist !== null) {
+          const dx = e.touches[1].clientX - e.touches[0].clientX;
+          const dy = e.touches[1].clientY - e.touches[0].clientY;
+          const newDist = Math.hypot(dx, dy);
+          const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+          const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+          applyZoom(zoom * (newDist / pinchDist), midX, midY);
+          pinchDist = newDist;
+        }
         e.preventDefault();
       }, { passive: false });
       canvas.addEventListener('touchend', (e) => {
-        if (e.changedTouches.length) pointerUp(e.changedTouches[0].clientX, e.changedTouches[0].clientY);
+        const wasPinching = pinchDist !== null;
+        if (e.touches.length < 2) pinchDist = null;
+        if (wasPinching && e.touches.length === 1) {
+          // Transition from pinch to single finger: re-anchor drag to avoid jump
+          pointerDown(e.touches[0].clientX, e.touches[0].clientY);
+        } else if (!wasPinching && e.touches.length === 0 && e.changedTouches.length) {
+          pointerUp(e.changedTouches[0].clientX, e.changedTouches[0].clientY);
+        }
         e.preventDefault();
       }, { passive: false });
 
@@ -462,6 +554,8 @@
         canvas.style.width  = logW + 'px';
         canvas.style.height = logH + 'px';
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        const clamped = Math.max(zoomMin(), Math.min(zoomMax(), zoom));
+        if (clamped !== zoom) applyZoom(clamped);
         loadVisibleChunks();
       }
 
@@ -486,6 +580,9 @@
           }, 1500);
         });
       });
+
+      document.getElementById('zoom-in').addEventListener('click', () => applyZoom(zoom * 1.25));
+      document.getElementById('zoom-out').addEventListener('click', () => applyZoom(zoom / 1.25));
 
       resize();
       offsetX = Math.round(logW / 2);
