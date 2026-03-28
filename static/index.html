@@ -31,11 +31,30 @@
 
       #hud-status.connected { color: #2d6a4a; }
       #hud-status.disconnected { color: #6a2d2d; }
+
+      #share-btn {
+        position: fixed;
+        bottom: 14px;
+        right: 14px;
+        font-family: "Courier New", monospace;
+        font-size: 11px;
+        color: #3d4a5c;
+        background: transparent;
+        border: 1px solid #1e2a38;
+        padding: 5px 10px;
+        cursor: pointer;
+        letter-spacing: 1px;
+        transition: color 0.2s, border-color 0.2s;
+        user-select: none;
+      }
+      #share-btn:hover { color: #6a8aaa; border-color: #3a5070; }
+      #share-btn.copied { color: #2d6a4a; border-color: #2d6a4a; }
     </style>
   </head>
   <body>
     <canvas id="canvas"></canvas>
     <input id="mobile-input" type="text" inputmode="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" style="position:fixed;opacity:0;top:-100px;left:0;width:1px;height:1px;pointer-events:none;" />
+    <button id="share-btn">share</button>
     <div id="hud">
       <div id="hud-left">
         <div id="hud-title">CALASCII</div>
@@ -452,6 +471,21 @@
         render();
         requestAnimationFrame(loop);
       }
+
+      const shareBtn = document.getElementById('share-btn');
+      shareBtn.addEventListener('click', () => {
+        const { wx, wy } = screenToWorld(logW / 2, logH / 2);
+        const { gx, gy } = worldToChunk(wx, wy);
+        const url = `${location.origin}${location.pathname}?gx=${gx}&gy=${gy}`;
+        navigator.clipboard.writeText(url).then(() => {
+          shareBtn.textContent = 'copied!';
+          shareBtn.classList.add('copied');
+          setTimeout(() => {
+            shareBtn.textContent = 'share';
+            shareBtn.classList.remove('copied');
+          }, 1500);
+        });
+      });
 
       resize();
       offsetX = Math.round(logW / 2);
