@@ -72,7 +72,6 @@ class CalasciiRouter(FastAPI):
     pending_chunks: set[tuple[int, int]] = set()
     pending_cursor_updates: dict[str, tuple[int, int]] = {}
     pending_cursor_removes: set[str] = set()
-    pending_account_updates: dict[str, dict] = {}
 
 
 class _MessageSet(TypedDict):
@@ -155,17 +154,6 @@ async def _broadcast_loop() -> None:
                         "color": app.id_to_color.get(client_id, auth.CURSOR_COLORS[0]),
                     })
 
-        if app.pending_account_updates:
-            account_snapshot = app.pending_account_updates.copy()
-            app.pending_account_updates.clear()
-            for client_id, info in account_snapshot.items():
-                for client in app.connected_clients:
-                    await client.send_json({
-                        "type": "account_update",
-                        "id": client_id,
-                        "username": info["username"],
-                        "color": info["color"],
-                    })
 
 
 @asynccontextmanager
@@ -239,11 +227,21 @@ async def process_message(message: Message, websocket: WebSocket) -> None:
         }))
 
 
-def _find_client_id_by_user_id(user_id: str) -> str | None:
-    for ws, user in app.client_users.items():
-        if user and user.get("sub") == user_id:
-            return app.client_ids.get(ws)
-    return None
+async def _dispatch_account_update(client_id: str, username: str, color: str) -> None:
+    packet = {"type": "account_update", "id": client_id, "username": username, "color": color}
+    for client in list(app.connected_clients):
+        try:
+            await client.send_json(packet)
+        except Exception:
+            pass
+
+
+def _find_client_ids_by_user_id(user_id: str) -> list[str]:
+    return [
+        cid for ws, user in app.client_users.items()
+        if user and user.get("sub") == user_id
+        and (cid := app.client_ids.get(ws)) is not None
+    ]
 
 
 @app.websocket("/ws")
@@ -405,10 +403,9 @@ async def change_username(request: Request):
         pass
 
     color = payload.get("cursor_color", auth.CURSOR_COLORS[0])
-    client_id = _find_client_id_by_user_id(payload["sub"])
-    if client_id is not None:
+    for client_id in _find_client_ids_by_user_id(payload["sub"]):
         app.id_to_username[client_id] = new_username
-        app.pending_account_updates[client_id] = {"username": new_username, "color": color}
+        asyncio.create_task(_dispatch_account_update(client_id, new_username, color))
 
     new_token = auth.create_jwt(user_id=payload["sub"], username=new_username, cursor_color=color)
     response = JSONResponse({"username": new_username, "cursor_color": color})
@@ -441,10 +438,9 @@ async def change_color(request: Request):
     except RuntimeError:
         pass
 
-    client_id = _find_client_id_by_user_id(payload["sub"])
-    if client_id is not None:
+    for client_id in _find_client_ids_by_user_id(payload["sub"]):
         app.id_to_color[client_id] = new_color
-        app.pending_account_updates[client_id] = {"username": app.id_to_username.get(client_id, payload["username"]), "color": new_color}
+        asyncio.create_task(_dispatch_account_update(client_id, app.id_to_username.get(client_id, ""), new_color))
 
     new_token = auth.create_jwt(
         user_id=payload["sub"],
