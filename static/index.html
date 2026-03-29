@@ -32,6 +32,10 @@
       #hud-status.connected { color: #2d6a4a; }
       #hud-status.disconnected { color: #6a2d2d; }
 
+      #hud-tiles { display: none; transition: color 0.3s; }
+      #hud-tiles.visible { display: block; }
+      #hud-tiles.at-limit { color: #6a3030; }
+
       #hud-auth { pointer-events: auto; }
       #hud-auth a {
         color: #3d4a5c;
@@ -206,6 +210,7 @@
         <div id="hud-status" class="disconnected">connecting</div>
         <div id="hud-auth"></div>
         <div id="hud-colors"></div>
+        <div id="hud-tiles"></div>
         <div id="hud-help">drag to pan &nbsp; click to place cursor &nbsp; type to write</div>
       </div>
     </div>
@@ -260,6 +265,9 @@
         '#22c55e', '#06b6d4', '#a855f7', '#ec4899',
       ];
       let myCursorColor = CURSOR_COLORS[0];
+      let myTileAllowance = 100;
+      let myTileClaimed = 0;
+      const hudTiles = document.getElementById('hud-tiles');
 
       function hexWithAlpha(hex, alpha) {
         const r = parseInt(hex.slice(1, 3), 16);
@@ -447,6 +455,11 @@
         }
         if (!canWrite(wx, wy)) return;
         const { gx, gy, sx, sy } = worldToChunk(wx, wy);
+        if (ch && myUserId) {
+          const existingCell = chunks.get(`${gx},${gy}`)?.[sx]?.[sy];
+          const existingOwner = Array.isArray(existingCell) ? existingCell[1] : null;
+          if ((!existingOwner || !existingOwner.startsWith('u:')) && myTileClaimed >= myTileAllowance) return;
+        }
         const key = `${gx},${gy}`;
         if (!chunks.has(key)) {
           chunks.set(key, Array.from({ length: CHUNK_SIZE }, () => Array.from({ length: CHUNK_SIZE }, () => ['', null])));
@@ -531,6 +544,12 @@
               userColors.set(msg.user_id, msg.color);
               userNames.set(msg.user_id, msg.username);
             }
+          } else if (msg.type === 'tile_allowance_update') {
+            myTileAllowance = msg.allowance;
+            myTileClaimed = msg.claimed;
+            hudTiles.textContent = `tiles ${msg.claimed} / ${msg.allowance}`;
+            hudTiles.classList.add('visible');
+            hudTiles.classList.toggle('at-limit', msg.claimed >= msg.allowance);
           }
         };
       }
