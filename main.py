@@ -57,7 +57,7 @@ class CalasciiData:
         to_delete: list[tuple[int, int, int, int]] = []
         for (g_x, g_y, s_x, s_y) in dirty:
             char, user_id = self._data[g_x][g_y][s_x][s_y]
-            if char:
+            if char is not None:
                 to_upsert.append(auth.CanvasTile(g_x=g_x, g_y=g_y, s_x=s_x, s_y=s_y, char=char, user_id=user_id))
             else:
                 to_delete.append((g_x, g_y, s_x, s_y))
