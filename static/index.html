@@ -75,6 +75,19 @@
       .color-swatch.selected { outline-color: rgba(255,255,255,0.75); }
       .color-swatch:hover { outline-color: rgba(255,255,255,0.35); }
 
+      #tile-tooltip {
+        position: fixed;
+        pointer-events: none;
+        font-family: "Courier New", monospace;
+        font-size: 11px;
+        color: #c8c8c8;
+        background: rgba(13, 13, 13, 0.88);
+        border: 1px solid #2a3a50;
+        padding: 3px 7px;
+        display: none;
+        z-index: 100;
+      }
+
       #auth-modal {
         position: fixed;
         inset: 0;
@@ -173,6 +186,7 @@
       <button id="zoom-out" class="corner-btn">-</button>
       <button id="zoom-in" class="corner-btn">+</button>
     </div>
+    <div id="tile-tooltip"></div>
     <div id="auth-modal" style="display:none">
       <div id="auth-modal-box">
         <div id="auth-modal-title">LOGIN REQUIRED</div>
@@ -206,6 +220,7 @@
       const hudCoords = document.getElementById('hud-coords');
       const hudStatus = document.getElementById('hud-status');
       const mobileInput = document.getElementById('mobile-input');
+      const tileTooltip = document.getElementById('tile-tooltip');
       const isMobile = navigator.maxTouchPoints > 0;
 
       let logW = window.innerWidth;
@@ -236,12 +251,22 @@
       let ws = null;
 
       let myId = null;
+      let myUserId = null;
       const otherCursors = new Map(); // id → {wx, wy, username, color}
+      const userColors = new Map(); // userId ("u:...") → color
+      const userNames = new Map(); // userId ("u:...") → username
       const CURSOR_COLORS = [
         '#ef4444', '#f97316', '#eab308',
         '#22c55e', '#06b6d4', '#a855f7', '#ec4899',
       ];
       let myCursorColor = CURSOR_COLORS[0];
+
+      function hexWithAlpha(hex, alpha) {
+        const r = parseInt(hex.slice(1, 3), 16);
+        const g = parseInt(hex.slice(3, 5), 16);
+        const b = parseInt(hex.slice(5, 7), 16);
+        return `rgba(${r},${g},${b},${alpha})`;
+      }
 
       function hexToFaint(hex) {
         const r = parseInt(hex.slice(1, 3), 16);
@@ -371,6 +396,13 @@
         loadVisibleChunks();
       }
 
+      function getCellOwner(wx, wy) {
+        const { gx, gy, sx, sy } = worldToChunk(wx, wy);
+        const cdata = chunks.get(`${gx},${gy}`);
+        const rawCell = cdata?.[sx]?.[sy];
+        return Array.isArray(rawCell) ? rawCell[1] : null;
+      }
+
       function worldToChunk(wx, wy) {
         const gx = Math.floor(wx / CHUNK_SIZE);
         const gy = Math.floor(wy / CHUNK_SIZE);
@@ -399,17 +431,27 @@
         ws.send(JSON.stringify({ type: 'get', g_x: gx, g_y: gy }));
       }
 
+      function canWrite(wx, wy) {
+        const { gx, gy, sx, sy } = worldToChunk(wx, wy);
+        const cell = chunks.get(`${gx},${gy}`)?.[sx]?.[sy];
+        if (!Array.isArray(cell)) return true;
+        const existingOwner = cell[1];
+        if (!existingOwner || !existingOwner.startsWith('u:')) return true;
+        return existingOwner === myUserId;
+      }
+
       function sendSet(wx, wy, ch) {
         if (!isAuthenticated) {
           showAuthModal();
           return;
         }
+        if (!canWrite(wx, wy)) return;
         const { gx, gy, sx, sy } = worldToChunk(wx, wy);
         const key = `${gx},${gy}`;
         if (!chunks.has(key)) {
-          chunks.set(key, Array.from({ length: CHUNK_SIZE }, () => new Array(CHUNK_SIZE).fill('')));
+          chunks.set(key, Array.from({ length: CHUNK_SIZE }, () => Array.from({ length: CHUNK_SIZE }, () => ['', null])));
         }
-        chunks.get(key)[sx][sy] = ch;
+        chunks.get(key)[sx][sy] = ch ? [ch, myUserId] : ['', null];
         if (!ws || ws.readyState !== WebSocket.OPEN) return;
         requestChunk(gx, gy);
         ws.send(JSON.stringify({ type: 'set', g_x: gx, g_y: gy, s_x: sx, s_y: sy, data: ch }));
@@ -457,6 +499,8 @@
           chunks.clear();
           requested.clear();
           otherCursors.clear();
+          userColors.clear();
+          userNames.clear();
           setTimeout(connect, 2000);
         };
 
@@ -466,8 +510,15 @@
           const msg = JSON.parse(e.data);
           if (msg.type === 'update_packet_get') {
             chunks.set(`${msg.g_x},${msg.g_y}`, msg.data);
+            if (msg.user_colors) {
+              for (const [uid, color] of Object.entries(msg.user_colors)) userColors.set(uid, color);
+              if (msg.user_names) {
+                for (const [uid, name] of Object.entries(msg.user_names)) userNames.set(uid, name);
+              }
+            }
           } else if (msg.type === 'welcome') {
             myId = msg.id;
+            myUserId = msg.my_user_id || null;
             for (const c of msg.cursors) otherCursors.set(c.id, { wx: c.wx, wy: c.wy, username: c.username, color: c.color });
           } else if (msg.type === 'cursor_update') {
             if (msg.id !== myId) otherCursors.set(msg.id, { wx: msg.wx, wy: msg.wy, username: msg.username, color: msg.color });
@@ -476,6 +527,10 @@
           } else if (msg.type === 'account_update') {
             const existing = otherCursors.get(msg.id);
             if (existing) otherCursors.set(msg.id, { ...existing, username: msg.username, color: msg.color });
+            if (msg.user_id) {
+              userColors.set(msg.user_id, msg.color);
+              userNames.set(msg.user_id, msg.username);
+            }
           }
         };
       }
@@ -503,7 +558,6 @@
         ctx.font = mainFont;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillStyle = '#c8c8c8';
 
         for (let gx = x0; gx <= x1; gx++) {
           for (let gy = y0; gy <= y1; gy++) {
@@ -516,12 +570,44 @@
               const col = data[sx];
               if (!col) continue;
               for (let sy = 0; sy < CHUNK_SIZE; sy++) {
-                const ch = col[sy];
-                if (!ch) continue;
+                const cell = col[sy];
+                const ch = Array.isArray(cell) ? cell[0] : cell;
+                const userId = Array.isArray(cell) ? cell[1] : null;
+                if (!ch && !userId) continue;
                 const wy = gy * CHUNK_SIZE + sy;
                 const screenY = wy * cellH + offsetY;
                 if (screenY + cellH < 0 || screenY > logH) continue;
-                ctx.fillText(ch, screenX + cellW / 2, screenY + cellH / 2);
+                if (userId) {
+                  const ownerColor = userColors.get(userId);
+                  if (ownerColor) {
+                    ctx.fillStyle = hexToFaint(ownerColor);
+                    ctx.fillRect(screenX, screenY, cellW, cellH);
+                    ctx.strokeStyle = hexWithAlpha(ownerColor, 0.65);
+                    ctx.lineWidth = 1.5;
+                    ctx.beginPath();
+                    if (getCellOwner(wx, wy - 1) !== userId) {
+                      ctx.moveTo(screenX, screenY + 0.75);
+                      ctx.lineTo(screenX + cellW, screenY + 0.75);
+                    }
+                    if (getCellOwner(wx, wy + 1) !== userId) {
+                      ctx.moveTo(screenX, screenY + cellH - 0.75);
+                      ctx.lineTo(screenX + cellW, screenY + cellH - 0.75);
+                    }
+                    if (getCellOwner(wx - 1, wy) !== userId) {
+                      ctx.moveTo(screenX + 0.75, screenY);
+                      ctx.lineTo(screenX + 0.75, screenY + cellH);
+                    }
+                    if (getCellOwner(wx + 1, wy) !== userId) {
+                      ctx.moveTo(screenX + cellW - 0.75, screenY);
+                      ctx.lineTo(screenX + cellW - 0.75, screenY + cellH);
+                    }
+                    ctx.stroke();
+                  }
+                }
+                if (ch) {
+                  ctx.fillStyle = '#c8c8c8';
+                  ctx.fillText(ch, screenX + cellW / 2, screenY + cellH / 2);
+                }
               }
             }
           }
@@ -544,7 +630,8 @@
 
           const { gx, gy, sx, sy } = worldToChunk(pos.wx, pos.wy);
           const cdata = chunks.get(`${gx},${gy}`);
-          const cch = cdata?.[sx]?.[sy] || '';
+          const rawCell = cdata?.[sx]?.[sy];
+          const cch = Array.isArray(rawCell) ? rawCell[0] : (rawCell || '');
           if (cch) {
             ctx.font = mainFont;
             ctx.textAlign = 'center';
@@ -572,7 +659,8 @@
           }
           const { gx, gy, sx, sy } = worldToChunk(cursor.wx, cursor.wy);
           const data = chunks.get(`${gx},${gy}`);
-          const ch = data?.[sx]?.[sy] || '';
+          const cursorCell = data?.[sx]?.[sy];
+          const ch = Array.isArray(cursorCell) ? cursorCell[0] : (cursorCell || '');
           if (ch) {
             ctx.font = mainFont;
             ctx.textAlign = 'center';
@@ -766,7 +854,20 @@
         canvas.style.cursor = 'grabbing';
         e.preventDefault();
       });
-      window.addEventListener('mousemove', (e) => pointerMove(e.clientX, e.clientY));
+      window.addEventListener('mousemove', (e) => {
+        pointerMove(e.clientX, e.clientY);
+        const { wx, wy } = screenToWorld(e.clientX, e.clientY);
+        const owner = getCellOwner(wx, wy);
+        const name = owner ? userNames.get(owner) : null;
+        if (name) {
+          tileTooltip.textContent = name;
+          tileTooltip.style.display = 'block';
+          tileTooltip.style.left = (e.clientX + 14) + 'px';
+          tileTooltip.style.top = (e.clientY + 14) + 'px';
+        } else {
+          tileTooltip.style.display = 'none';
+        }
+      });
       window.addEventListener('mouseup',   (e) => pointerUp(e.clientX, e.clientY));
 
       canvas.addEventListener('wheel', (e) => {

@@ -165,6 +165,20 @@ async def upsert_user(
             return (row[0], row[1]) if row else (new_id, color)
 
 
+async def get_users_by_ids(ids: list[str]) -> dict[str, tuple[str, str]]:
+    """Return {id: (username, cursor_color)} for the given user ids."""
+    if _pool is None or not ids:
+        return {}
+    placeholders = ",".join(["%s"] * len(ids))
+    async with _pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                f"SELECT id, username, cursor_color FROM users WHERE id IN ({placeholders})",
+                ids,
+            )
+            return {row[0]: (row[1], row[2]) for row in await cur.fetchall()}
+
+
 async def update_username(user_id: str, username: str) -> None:
     if _pool is None:
         raise RuntimeError("Database not yet available")
