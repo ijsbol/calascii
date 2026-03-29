@@ -1,5 +1,6 @@
 import asyncio
 import json
+import random
 import secrets
 import uuid
 from contextlib import asynccontextmanager
@@ -65,11 +66,13 @@ class CalasciiRouter(FastAPI):
     client_ids: dict[WebSocket, str] = {}
     client_users: dict[WebSocket, dict | None] = {}
     id_to_username: dict[str, str] = {}
+    id_to_color: dict[str, str] = {}
     cursors: dict[str, tuple[int, int] | None] = {}
     data: CalasciiData = CalasciiData()
     pending_chunks: set[tuple[int, int]] = set()
     pending_cursor_updates: dict[str, tuple[int, int]] = {}
     pending_cursor_removes: set[str] = set()
+    pending_account_updates: dict[str, dict] = {}
 
 
 class _MessageSet(TypedDict):
@@ -149,6 +152,19 @@ async def _broadcast_loop() -> None:
                         "wx": wx,
                         "wy": wy,
                         "username": app.id_to_username.get(client_id, client_id[:6]),
+                        "color": app.id_to_color.get(client_id, auth.CURSOR_COLORS[0]),
+                    })
+
+        if app.pending_account_updates:
+            account_snapshot = app.pending_account_updates.copy()
+            app.pending_account_updates.clear()
+            for client_id, info in account_snapshot.items():
+                for client in app.connected_clients:
+                    await client.send_json({
+                        "type": "account_update",
+                        "id": client_id,
+                        "username": info["username"],
+                        "color": info["color"],
                     })
 
 
@@ -223,6 +239,13 @@ async def process_message(message: Message, websocket: WebSocket) -> None:
         }))
 
 
+def _find_client_id_by_user_id(user_id: str) -> str | None:
+    for ws, user in app.client_users.items():
+        if user and user.get("sub") == user_id:
+            return app.client_ids.get(ws)
+    return None
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -232,17 +255,29 @@ async def websocket_endpoint(websocket: WebSocket):
 
     client_id = str(uuid.uuid4())
     username = user_payload["username"] if user_payload else client_id[:6]
+    cursor_color = (
+        user_payload.get("cursor_color", auth.CURSOR_COLORS[0])
+        if user_payload
+        else random.choice(auth.CURSOR_COLORS)
+    )
     app.connected_clients[websocket] = []
     app.client_ids[websocket] = client_id
     app.client_users[websocket] = user_payload
     app.id_to_username[client_id] = username
+    app.id_to_color[client_id] = cursor_color
     app.cursors[client_id] = None
 
     await websocket.send_json({
         "type": "welcome",
         "id": client_id,
         "cursors": [
-            {"id": cid, "wx": pos[0], "wy": pos[1], "username": app.id_to_username.get(cid, cid[:6])}
+            {
+                "id": cid,
+                "wx": pos[0],
+                "wy": pos[1],
+                "username": app.id_to_username.get(cid, cid[:6]),
+                "color": app.id_to_color.get(cid, auth.CURSOR_COLORS[0]),
+            }
             for cid, pos in app.cursors.items()
             if cid != client_id and pos is not None
         ],
@@ -257,6 +292,7 @@ async def websocket_endpoint(websocket: WebSocket):
         del app.client_ids[websocket]
         del app.client_users[websocket]
         del app.id_to_username[client_id]
+        del app.id_to_color[client_id]
         del app.cursors[client_id]
         app.pending_cursor_removes.add(client_id)
         app.pending_cursor_updates.pop(client_id, None)
@@ -296,8 +332,10 @@ async def discord_callback(
         response.delete_cookie("oauth_state")
         return response
 
+    user_id = user_data["id"]
+    cursor_color = auth.CURSOR_COLORS[0]
     try:
-        await auth.upsert_user(
+        user_id, cursor_color = await auth.upsert_user(
             discord_id=user_data["id"],
             username=user_data["username"],
             global_name=user_data.get("global_name"),
@@ -306,8 +344,9 @@ async def discord_callback(
         pass  # DB not yet ready; proceed without recording the user
 
     jwt_token = auth.create_jwt(
-        discord_id=user_data["id"],
+        user_id=user_id,
         username=user_data["username"],
+        cursor_color=cursor_color,
     )
 
     response = RedirectResponse("/")
@@ -342,6 +381,7 @@ async def me(request: Request):
     return JSONResponse({
         "authenticated": True,
         "username": payload["username"],
+        "cursor_color": payload.get("cursor_color", auth.CURSOR_COLORS[0]),
     })
 
 
@@ -364,8 +404,54 @@ async def change_username(request: Request):
     except RuntimeError:
         pass
 
-    new_token = auth.create_jwt(discord_id=payload["sub"], username=new_username)
-    response = JSONResponse({"username": new_username})
+    color = payload.get("cursor_color", auth.CURSOR_COLORS[0])
+    client_id = _find_client_id_by_user_id(payload["sub"])
+    if client_id is not None:
+        app.id_to_username[client_id] = new_username
+        app.pending_account_updates[client_id] = {"username": new_username, "color": color}
+
+    new_token = auth.create_jwt(user_id=payload["sub"], username=new_username, cursor_color=color)
+    response = JSONResponse({"username": new_username, "cursor_color": color})
+    response.set_cookie(
+        "session",
+        new_token,
+        max_age=auth.JWT_EXPIRY_SECONDS,
+        httponly=True,
+        samesite="lax",
+    )
+    return response
+
+
+@app.post("/auth/color")
+async def change_color(request: Request):
+    token = request.cookies.get("session")
+    if not token:
+        return JSONResponse({"error": "not authenticated"}, status_code=401)
+    payload = auth.decode_jwt(token)
+    if not payload:
+        return JSONResponse({"error": "not authenticated"}, status_code=401)
+
+    body = await request.json()
+    new_color = body.get("color", "")
+    if new_color not in auth.CURSOR_COLORS:
+        return JSONResponse({"error": "invalid color"}, status_code=400)
+
+    try:
+        await auth.update_cursor_color(payload["sub"], new_color)
+    except RuntimeError:
+        pass
+
+    client_id = _find_client_id_by_user_id(payload["sub"])
+    if client_id is not None:
+        app.id_to_color[client_id] = new_color
+        app.pending_account_updates[client_id] = {"username": app.id_to_username.get(client_id, payload["username"]), "color": new_color}
+
+    new_token = auth.create_jwt(
+        user_id=payload["sub"],
+        username=payload["username"],
+        cursor_color=new_color,
+    )
+    response = JSONResponse({"cursor_color": new_color})
     response.set_cookie(
         "session",
         new_token,
