@@ -75,6 +75,19 @@
       .color-swatch.selected { outline-color: rgba(255,255,255,0.75); }
       .color-swatch:hover { outline-color: rgba(255,255,255,0.35); }
 
+      #tile-tooltip {
+        position: fixed;
+        pointer-events: none;
+        font-family: "Courier New", monospace;
+        font-size: 11px;
+        color: #c8c8c8;
+        background: rgba(13, 13, 13, 0.88);
+        border: 1px solid #2a3a50;
+        padding: 3px 7px;
+        display: none;
+        z-index: 100;
+      }
+
       #auth-modal {
         position: fixed;
         inset: 0;
@@ -173,6 +186,7 @@
       <button id="zoom-out" class="corner-btn">-</button>
       <button id="zoom-in" class="corner-btn">+</button>
     </div>
+    <div id="tile-tooltip"></div>
     <div id="auth-modal" style="display:none">
       <div id="auth-modal-box">
         <div id="auth-modal-title">LOGIN REQUIRED</div>
@@ -206,6 +220,7 @@
       const hudCoords = document.getElementById('hud-coords');
       const hudStatus = document.getElementById('hud-status');
       const mobileInput = document.getElementById('mobile-input');
+      const tileTooltip = document.getElementById('tile-tooltip');
       const isMobile = navigator.maxTouchPoints > 0;
 
       let logW = window.innerWidth;
@@ -239,6 +254,7 @@
       let myUserId = null;
       const otherCursors = new Map(); // id → {wx, wy, username, color}
       const userColors = new Map(); // userId ("u:...") → color
+      const userNames = new Map(); // userId ("u:...") → username
       const CURSOR_COLORS = [
         '#ef4444', '#f97316', '#eab308',
         '#22c55e', '#06b6d4', '#a855f7', '#ec4899',
@@ -380,6 +396,13 @@
         loadVisibleChunks();
       }
 
+      function getCellOwner(wx, wy) {
+        const { gx, gy, sx, sy } = worldToChunk(wx, wy);
+        const cdata = chunks.get(`${gx},${gy}`);
+        const rawCell = cdata?.[sx]?.[sy];
+        return Array.isArray(rawCell) ? rawCell[1] : null;
+      }
+
       function worldToChunk(wx, wy) {
         const gx = Math.floor(wx / CHUNK_SIZE);
         const gy = Math.floor(wy / CHUNK_SIZE);
@@ -477,6 +500,7 @@
           requested.clear();
           otherCursors.clear();
           userColors.clear();
+          userNames.clear();
           setTimeout(connect, 2000);
         };
 
@@ -488,6 +512,9 @@
             chunks.set(`${msg.g_x},${msg.g_y}`, msg.data);
             if (msg.user_colors) {
               for (const [uid, color] of Object.entries(msg.user_colors)) userColors.set(uid, color);
+              if (msg.user_names) {
+                for (const [uid, name] of Object.entries(msg.user_names)) userNames.set(uid, name);
+              }
             }
           } else if (msg.type === 'welcome') {
             myId = msg.id;
@@ -549,9 +576,28 @@
                 if (userId) {
                   const ownerColor = userColors.get(userId);
                   if (ownerColor) {
-                    ctx.strokeStyle = hexWithAlpha(ownerColor, 0.45);
-                    ctx.lineWidth = 0.75;
-                    ctx.strokeRect(screenX + 0.5, screenY + 0.5, cellW - 1, cellH - 1);
+                    ctx.fillStyle = hexToFaint(ownerColor);
+                    ctx.fillRect(screenX, screenY, cellW, cellH);
+                    ctx.strokeStyle = hexWithAlpha(ownerColor, 0.65);
+                    ctx.lineWidth = 1.5;
+                    ctx.beginPath();
+                    if (getCellOwner(wx, wy - 1) !== userId) {
+                      ctx.moveTo(screenX, screenY + 0.75);
+                      ctx.lineTo(screenX + cellW, screenY + 0.75);
+                    }
+                    if (getCellOwner(wx, wy + 1) !== userId) {
+                      ctx.moveTo(screenX, screenY + cellH - 0.75);
+                      ctx.lineTo(screenX + cellW, screenY + cellH - 0.75);
+                    }
+                    if (getCellOwner(wx - 1, wy) !== userId) {
+                      ctx.moveTo(screenX + 0.75, screenY);
+                      ctx.lineTo(screenX + 0.75, screenY + cellH);
+                    }
+                    if (getCellOwner(wx + 1, wy) !== userId) {
+                      ctx.moveTo(screenX + cellW - 0.75, screenY);
+                      ctx.lineTo(screenX + cellW - 0.75, screenY + cellH);
+                    }
+                    ctx.stroke();
                   }
                 }
                 if (ch) {
@@ -804,7 +850,20 @@
         canvas.style.cursor = 'grabbing';
         e.preventDefault();
       });
-      window.addEventListener('mousemove', (e) => pointerMove(e.clientX, e.clientY));
+      window.addEventListener('mousemove', (e) => {
+        pointerMove(e.clientX, e.clientY);
+        const { wx, wy } = screenToWorld(e.clientX, e.clientY);
+        const owner = getCellOwner(wx, wy);
+        const name = owner ? userNames.get(owner) : null;
+        if (name) {
+          tileTooltip.textContent = name;
+          tileTooltip.style.display = 'block';
+          tileTooltip.style.left = (e.clientX + 14) + 'px';
+          tileTooltip.style.top = (e.clientY + 14) + 'px';
+        } else {
+          tileTooltip.style.display = 'none';
+        }
+      });
       window.addEventListener('mouseup',   (e) => pointerUp(e.clientX, e.clientY));
 
       canvas.addEventListener('wheel', (e) => {

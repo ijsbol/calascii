@@ -103,6 +103,7 @@ class CalasciiRouter(FastAPI):
     id_to_username: dict[str, str] = {}
     id_to_color: dict[str, str] = {}
     sub_to_color: dict[str, str] = {}
+    sub_to_username: dict[str, str] = {}
     cursors: dict[str, tuple[int, int] | None] = {}
     data: CalasciiData = CalasciiData()
     pending_chunks: set[tuple[int, int]] = set()
@@ -144,6 +145,7 @@ class _UpdatePacketGet(TypedDict):
     g_y: int
     data: list[list[tuple[str, str | None]]]
     user_colors: dict[str, str]
+    user_names: dict[str, str]
 
 
 async def _save_loop() -> None:
@@ -164,6 +166,47 @@ def _build_user_colors(chunk_data: list[list[tuple[str, str | None]]]) -> dict[s
     return result
 
 
+def _build_user_names(chunk_data: list[list[tuple[str, str | None]]]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for col in chunk_data:
+        for (_, uid) in col:
+            if uid and uid not in result:
+                sub = uid[2:] if uid.startswith("u:") else uid
+                name = app.sub_to_username.get(sub)
+                if name:
+                    result[uid] = name
+    return result
+
+
+async def _fill_user_cache(chunk_data: list[list[tuple[str, str | None]]]) -> None:
+    """Fetch username/color from DB for any tile owners not already in the in-memory cache."""
+    missing = set()
+    for col in chunk_data:
+        for (_, uid) in col:
+            if uid and uid.startswith("u:"):
+                sub = uid[2:]
+                if sub not in app.sub_to_color or sub not in app.sub_to_username:
+                    missing.add(sub)
+    if not missing:
+        return
+    rows = await auth.get_users_by_ids(list(missing))
+    for sub, (username, color) in rows.items():
+        app.sub_to_color[sub] = color
+        app.sub_to_username[sub] = username
+
+
+async def _build_chunk_packet(g_x: int, g_y: int, chunk_data: list[list[tuple[str, str | None]]]) -> _UpdatePacketGet:
+    await _fill_user_cache(chunk_data)
+    return _UpdatePacketGet({
+        "type": "update_packet_get",
+        "g_x": g_x,
+        "g_y": g_y,
+        "data": chunk_data,
+        "user_colors": _build_user_colors(chunk_data),
+        "user_names": _build_user_names(chunk_data),
+    })
+
+
 async def _broadcast_loop() -> None:
     while True:
         await asyncio.sleep(BROADCAST_INTERVAL)
@@ -173,13 +216,7 @@ async def _broadcast_loop() -> None:
             app.pending_chunks.clear()
             for (g_x, g_y) in chunks_snapshot:
                 chunk_data = app.data.get(g_x=g_x, g_y=g_y)
-                packet = _UpdatePacketGet({
-                    "type": "update_packet_get",
-                    "g_x": g_x,
-                    "g_y": g_y,
-                    "data": chunk_data,
-                    "user_colors": _build_user_colors(chunk_data),
-                })
+                packet = await _build_chunk_packet(g_x, g_y, chunk_data)
                 for client, subscribed in app.connected_clients.items():
                     if (g_x, g_y) in subscribed:
                         await client.send_json(packet)
@@ -277,13 +314,7 @@ async def process_message(message: Message, websocket: WebSocket) -> None:
         if chunk_key not in app.connected_clients[websocket]:
             app.connected_clients[websocket].append(chunk_key)
         chunk_data = app.data.get(g_x=message["g_x"], g_y=message["g_y"])
-        await websocket.send_json(_UpdatePacketGet({
-            "type": "update_packet_get",
-            "g_x": message["g_x"],
-            "g_y": message["g_y"],
-            "data": chunk_data,
-            "user_colors": _build_user_colors(chunk_data),
-        }))
+        await websocket.send_json(await _build_chunk_packet(message["g_x"], message["g_y"], chunk_data))
 
 
 async def _dispatch_account_update(client_id: str, username: str, color: str) -> None:
@@ -325,6 +356,7 @@ async def websocket_endpoint(websocket: WebSocket):
     app.cursors[client_id] = None
     if user_payload:
         app.sub_to_color[user_payload["sub"]] = cursor_color
+        app.sub_to_username[user_payload["sub"]] = username
 
     await websocket.send_json({
         "type": "welcome",
@@ -465,6 +497,7 @@ async def change_username(request: Request):
         pass
 
     color = payload.get("cursor_color", auth.CURSOR_COLORS[0])
+    app.sub_to_username[payload["sub"]] = new_username
     for client_id in _find_client_ids_by_user_id(payload["sub"]):
         app.id_to_username[client_id] = new_username
         asyncio.create_task(_dispatch_account_update(client_id, new_username, color))
