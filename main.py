@@ -82,6 +82,10 @@ class CalasciiRouter(FastAPI):
     pending_chunks: set[tuple[int, int]] = set()
     pending_cursor_updates: dict[str, tuple[int, int]] = {}
     pending_cursor_removes: set[str] = set()
+    # Tile allowance tracking (keyed by user UUID / sub)
+    user_id_to_sockets: dict[str, set] = {}
+    user_id_to_allowance: dict[str, int] = {}
+    user_id_to_claimed: dict[str, int] = {}
 
 
 class _MessageSet(TypedDict):
@@ -215,6 +219,19 @@ async def _broadcast_loop() -> None:
                         "color": app.id_to_color.get(client_id, auth.CURSOR_COLORS[0]),
                     })
 
+        if app.user_id_to_sockets:
+            connected_ids = list(app.user_id_to_sockets.keys())
+            new_allowances = await auth.increment_tile_allowances(connected_ids)
+            for user_id, new_allowance in new_allowances.items():
+                app.user_id_to_allowance[user_id] = new_allowance
+                claimed = app.user_id_to_claimed.get(user_id, 0)
+                packet = {"type": "tile_allowance_update", "allowance": new_allowance, "claimed": claimed}
+                for sock in list(app.user_id_to_sockets.get(user_id, set())):
+                    try:
+                        await sock.send_json(packet)
+                    except Exception:
+                        pass
+
 
 
 @asynccontextmanager
@@ -248,11 +265,21 @@ async def process_message(message: Message, websocket: WebSocket) -> None:
         if not (0 <= message["s_x"] < CHUNK_SIZE and 0 <= message["s_y"] < CHUNK_SIZE):
             return
         effective_user_id = ("u:" + user_payload["sub"]) if user_payload else None
+        existing_owner: str | None = None
         if not auth.NO_AUTH and effective_user_id:
             existing = app.data.get(g_x=message["g_x"], g_y=message["g_y"])[message["s_x"]][message["s_y"]]
             existing_owner = existing[1]
             if existing_owner and existing_owner.startswith("u:") and existing_owner != effective_user_id:
                 return
+            # Enforce tile allowance for new claims
+            if message["data"] and existing_owner is None:
+                sub = effective_user_id[2:]  # strip "u:" prefix
+                claimed = app.user_id_to_claimed.get(sub, 0)
+                allowance = app.user_id_to_allowance.get(sub, 100)
+                if claimed >= allowance:
+                    chunk_data = app.data.get(g_x=message["g_x"], g_y=message["g_y"])
+                    await websocket.send_json(await _build_chunk_packet(message["g_x"], message["g_y"], chunk_data))
+                    return
         stored_user_id = effective_user_id if message["data"] else None
         app.data.set(
             g_x=message["g_x"],
@@ -263,6 +290,25 @@ async def process_message(message: Message, websocket: WebSocket) -> None:
             user_id=stored_user_id,
         )
         app.pending_chunks.add((message["g_x"], message["g_y"]))
+        # Update claimed count and notify the user's sockets
+        if not auth.NO_AUTH and effective_user_id:
+            sub = effective_user_id[2:]  # strip "u:" prefix
+            count_changed = False
+            if message["data"] and existing_owner is None:
+                app.user_id_to_claimed[sub] = app.user_id_to_claimed.get(sub, 0) + 1
+                count_changed = True
+            elif not message["data"] and existing_owner == effective_user_id:
+                app.user_id_to_claimed[sub] = max(0, app.user_id_to_claimed.get(sub, 0) - 1)
+                count_changed = True
+            if count_changed:
+                allowance = app.user_id_to_allowance.get(sub, 100)
+                claimed = app.user_id_to_claimed[sub]
+                packet = {"type": "tile_allowance_update", "allowance": allowance, "claimed": claimed}
+                for sock in list(app.user_id_to_sockets.get(sub, set())):
+                    try:
+                        await sock.send_json(packet)
+                    except Exception:
+                        pass
 
     elif message["type"] == "cursor_move":
         client_id = app.client_ids.get(websocket)
@@ -331,6 +377,22 @@ async def websocket_endpoint(websocket: WebSocket):
         app.sub_to_color[user_payload["sub"]] = cursor_color
         app.sub_to_username[user_payload["sub"]] = username
 
+    # Register socket for tile allowance tracking
+    tile_allowance_packet: dict | None = None
+    if user_payload:
+        sub = user_payload["sub"]
+        if sub not in app.user_id_to_sockets:
+            app.user_id_to_sockets[sub] = set()
+            allowance, claimed = await auth.get_user_tile_info(sub)
+            app.user_id_to_allowance[sub] = allowance
+            app.user_id_to_claimed[sub] = claimed
+        app.user_id_to_sockets[sub].add(websocket)
+        tile_allowance_packet = {
+            "type": "tile_allowance_update",
+            "allowance": app.user_id_to_allowance[sub],
+            "claimed": app.user_id_to_claimed[sub],
+        }
+
     await websocket.send_json({
         "type": "welcome",
         "id": client_id,
@@ -347,6 +409,8 @@ async def websocket_endpoint(websocket: WebSocket):
             if cid != client_id and pos is not None
         ],
     })
+    if tile_allowance_packet:
+        await websocket.send_json(tile_allowance_packet)
 
     try:
         while True:
@@ -361,6 +425,15 @@ async def websocket_endpoint(websocket: WebSocket):
         del app.cursors[client_id]
         app.pending_cursor_removes.add(client_id)
         app.pending_cursor_updates.pop(client_id, None)
+        if user_payload:
+            sub = user_payload["sub"]
+            sockets = app.user_id_to_sockets.get(sub)
+            if sockets is not None:
+                sockets.discard(websocket)
+                if not sockets:
+                    del app.user_id_to_sockets[sub]
+                    app.user_id_to_allowance.pop(sub, None)
+                    app.user_id_to_claimed.pop(sub, None)
 
 
 @app.get("/auth/discord/login")

@@ -121,6 +121,7 @@ async def init_db() -> None:
             await cur.execute(
                 "SELECT 1 FROM _migrations WHERE name = '002_uuid_primary_key'"
             )
+
             if not await cur.fetchone():
                 await cur.execute("""
                     SELECT 1 FROM information_schema.columns
@@ -149,6 +150,24 @@ async def init_db() -> None:
                     )
                 await cur.execute(
                     "INSERT INTO _migrations (name) VALUES ('002_uuid_primary_key')"
+                )
+            # Migration 003: add tile_allowance column to users
+            await cur.execute(
+                "SELECT 1 FROM _migrations WHERE name = '003_tile_allowance'"
+            )
+            if not await cur.fetchone():
+                await cur.execute("""
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = DATABASE()
+                    AND table_name = 'users'
+                    AND column_name = 'tile_allowance'
+                """)
+                if not await cur.fetchone():
+                    await cur.execute(
+                        "ALTER TABLE users ADD COLUMN tile_allowance INT NOT NULL DEFAULT 100"
+                    )
+                await cur.execute(
+                    "INSERT INTO _migrations (name) VALUES ('003_tile_allowance')"
                 )
 
 
@@ -300,6 +319,44 @@ async def delete_tiles(coords: list[tuple[int, int, int, int]]) -> None:
                 "DELETE FROM canvas_tiles WHERE g_x=%s AND g_y=%s AND s_x=%s AND s_y=%s",
                 coords,
             )
+
+
+async def get_user_tile_info(user_id: str) -> tuple[int, int]:
+    """Return (tile_allowance, tiles_claimed) for a user."""
+    if _pool is None:
+        return (100, 0)
+    async with _pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT tile_allowance FROM users WHERE id = %s", (user_id,)
+            )
+            row = await cur.fetchone()
+            allowance = row[0] if row else 100
+            await cur.execute(
+                "SELECT COUNT(*) FROM canvas_tiles WHERE user_id = %s",
+                (f"u:{user_id}",),
+            )
+            row = await cur.fetchone()
+            claimed = row[0] if row else 0
+            return (allowance, claimed)
+
+
+async def increment_tile_allowances(user_ids: list[str]) -> dict[str, int]:
+    """Increment tile_allowance by 1 for each user. Returns {user_id: new_allowance}."""
+    if _pool is None or not user_ids:
+        return {}
+    placeholders = ",".join(["%s"] * len(user_ids))
+    async with _pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                f"UPDATE users SET tile_allowance = tile_allowance + 1 WHERE id IN ({placeholders})",
+                user_ids,
+            )
+            await cur.execute(
+                f"SELECT id, tile_allowance FROM users WHERE id IN ({placeholders})",
+                user_ids,
+            )
+            return {row[0]: row[1] for row in await cur.fetchall()}
 
 
 async def load_all_tiles() -> list[CanvasTile]:
