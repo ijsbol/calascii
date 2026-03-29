@@ -367,7 +367,7 @@ async def load_all_tiles() -> list[CanvasTile]:
         async with conn.cursor() as cur:
             await cur.execute(
                 "SELECT g_x, g_y, s_x, s_y, `char`, user_id"
-                " FROM canvas_tiles WHERE `char` != ''"
+                " FROM canvas_tiles WHERE CHAR_LENGTH(`char`) > 0"
             )
             return [
                 CanvasTile(g_x=r[0], g_y=r[1], s_x=r[2], s_y=r[3], char=r[4], user_id=r[5])
