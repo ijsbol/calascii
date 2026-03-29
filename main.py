@@ -72,6 +72,7 @@ class CalasciiRouter(FastAPI):
     pending_chunks: set[tuple[int, int]] = set()
     pending_cursor_updates: dict[str, tuple[int, int]] = {}
     pending_cursor_removes: set[str] = set()
+    pending_account_updates: dict[str, dict] = {}
 
 
 class _MessageSet(TypedDict):
@@ -154,6 +155,18 @@ async def _broadcast_loop() -> None:
                         "color": app.id_to_color.get(client_id, auth.CURSOR_COLORS[0]),
                     })
 
+        if app.pending_account_updates:
+            account_snapshot = app.pending_account_updates.copy()
+            app.pending_account_updates.clear()
+            for client_id, info in account_snapshot.items():
+                for client in app.connected_clients:
+                    await client.send_json({
+                        "type": "account_update",
+                        "id": client_id,
+                        "username": info["username"],
+                        "color": info["color"],
+                    })
+
 
 @asynccontextmanager
 async def lifecycle(app: CalasciiRouter):
@@ -224,6 +237,13 @@ async def process_message(message: Message, websocket: WebSocket) -> None:
                 g_y=message["g_y"],
             ),
         }))
+
+
+def _find_client_id_by_user_id(user_id: str) -> str | None:
+    for ws, user in app.client_users.items():
+        if user and user.get("sub") == user_id:
+            return app.client_ids.get(ws)
+    return None
 
 
 @app.websocket("/ws")
@@ -312,9 +332,10 @@ async def discord_callback(
         response.delete_cookie("oauth_state")
         return response
 
+    user_id = user_data["id"]
     cursor_color = auth.CURSOR_COLORS[0]
     try:
-        cursor_color = await auth.upsert_user(
+        user_id, cursor_color = await auth.upsert_user(
             discord_id=user_data["id"],
             username=user_data["username"],
             global_name=user_data.get("global_name"),
@@ -323,7 +344,7 @@ async def discord_callback(
         pass  # DB not yet ready; proceed without recording the user
 
     jwt_token = auth.create_jwt(
-        discord_id=user_data["id"],
+        user_id=user_id,
         username=user_data["username"],
         cursor_color=cursor_color,
     )
@@ -384,7 +405,12 @@ async def change_username(request: Request):
         pass
 
     color = payload.get("cursor_color", auth.CURSOR_COLORS[0])
-    new_token = auth.create_jwt(discord_id=payload["sub"], username=new_username, cursor_color=color)
+    client_id = _find_client_id_by_user_id(payload["sub"])
+    if client_id is not None:
+        app.id_to_username[client_id] = new_username
+        app.pending_account_updates[client_id] = {"username": new_username, "color": color}
+
+    new_token = auth.create_jwt(user_id=payload["sub"], username=new_username, cursor_color=color)
     response = JSONResponse({"username": new_username, "cursor_color": color})
     response.set_cookie(
         "session",
@@ -415,8 +441,13 @@ async def change_color(request: Request):
     except RuntimeError:
         pass
 
+    client_id = _find_client_id_by_user_id(payload["sub"])
+    if client_id is not None:
+        app.id_to_color[client_id] = new_color
+        app.pending_account_updates[client_id] = {"username": app.id_to_username.get(client_id, payload["username"]), "color": new_color}
+
     new_token = auth.create_jwt(
-        discord_id=payload["sub"],
+        user_id=payload["sub"],
         username=payload["username"],
         cursor_color=new_color,
     )

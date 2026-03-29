@@ -473,6 +473,9 @@
             if (msg.id !== myId) otherCursors.set(msg.id, { wx: msg.wx, wy: msg.wy, username: msg.username, color: msg.color });
           } else if (msg.type === 'cursor_remove') {
             otherCursors.delete(msg.id);
+          } else if (msg.type === 'account_update') {
+            const existing = otherCursors.get(msg.id);
+            if (existing) otherCursors.set(msg.id, { ...existing, username: msg.username, color: msg.color });
           }
         };
       }
