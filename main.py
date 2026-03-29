@@ -1,11 +1,10 @@
 import asyncio
-import json
 import random
 import secrets
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Final, Literal, TypedDict
+from typing import Final, Literal, TypedDict
 
 import auth
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -17,7 +16,6 @@ __all__: tuple[str, ...] = ()
 
 
 CHUNK_SIZE: Final[int] = 50
-SAVE_PATH: Final[Path] = Path(__file__).parent / "data.json"
 SAVE_INTERVAL: Final[int] = 300  # seconds
 BROADCAST_INTERVAL: Final[int] = 1  # seconds
 
@@ -25,6 +23,7 @@ BROADCAST_INTERVAL: Final[int] = 1  # seconds
 class CalasciiData:
     def __init__(self) -> None:
         self._data: dict[int, dict[int, list[list[tuple[str, str | None]]]]] = {}
+        self._dirty_tiles: set[tuple[int, int, int, int]] = set()
 
     def _ensure_chunk(self, g_x: int, g_y: int) -> list[list[tuple[str, str | None]]]:
         if g_x not in self._data:
@@ -38,62 +37,36 @@ class CalasciiData:
 
     def set(self, g_x: int, g_y: int, s_x: int, s_y: int, data: str, user_id: str | None) -> None:
         self._ensure_chunk(g_x, g_y)[s_x][s_y] = (data, user_id)
+        self._dirty_tiles.add((g_x, g_y, s_x, s_y))
 
     def get(self, g_x: int, g_y: int) -> list[list[tuple[str, str | None]]]:
         return self._ensure_chunk(g_x, g_y)
 
-    DATA_VERSION: Final[int] = 2
+    async def load_from_db(self) -> None:
+        for tile in await auth.load_all_tiles():
+            self._ensure_chunk(tile["g_x"], tile["g_y"])[tile["s_x"]][tile["s_y"]] = (
+                tile["char"], tile["user_id"]
+            )
 
-    def save(self, path: Path) -> None:
-        serialized: dict[str, Any] = {
-            "version": self.DATA_VERSION,
-            "chunks": {
-                str(g_x): {str(g_y): chunk for g_y, chunk in cols.items()}
-                for g_x, cols in self._data.items()
-            },
-        }
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(serialized))
-        tmp.replace(path)
-
-    def _migrate(self, raw: dict[str, Any]) -> dict[str, dict[str, list[list[tuple[str, str | None]]]]]:
-        version: int = raw.get("version", 0)
-        raw_chunks: dict[str, Any] = raw.get("chunks", raw) if version >= 1 else raw
-
-        result: dict[str, dict[str, list[list[tuple[str, str | None]]]]] = {}
-        for g_x, cols in raw_chunks.items():
-            result[g_x] = {}
-            for g_y, chunk in cols.items():
-                migrated: list[list[tuple[str, str | None]]] = []
-                for col in chunk:
-                    migrated_col: list[tuple[str, str | None]] = []
-                    for cell in col:
-                        if isinstance(cell, str):
-                            # v0: plain string cell, no ownership
-                            migrated_col.append((cell, None))
-                        elif isinstance(cell, list) and len(cell) == 2:
-                            char: str = cell[0] or ""
-                            uid: str | None = cell[1]
-                            # v1: user_id was a raw session UUID, not a stable sub —
-                            # only keep ids already in the "u:..." format (v2+)
-                            if version < 2 and uid and not uid.startswith("u:"):
-                                uid = None
-                            migrated_col.append((char, uid))
-                        else:
-                            migrated_col.append(("", None))
-                    migrated.append(migrated_col)
-                result[g_x][g_y] = migrated
-        return result
-
-    def load(self, path: Path) -> None:
-        if not path.exists():
+    async def flush_dirty(self) -> None:
+        dirty = self._dirty_tiles.copy()
+        self._dirty_tiles.clear()
+        if not dirty:
             return
-        raw = json.loads(path.read_text())
-        clean = self._migrate(raw)
-        self._data = {
-            int(g_x): {int(g_y): chunk for g_y, chunk in cols.items()}
-            for g_x, cols in clean.items()
-        }
+        to_upsert: list[auth.CanvasTile] = []
+        to_delete: list[tuple[int, int, int, int]] = []
+        for (g_x, g_y, s_x, s_y) in dirty:
+            char, user_id = self._data[g_x][g_y][s_x][s_y]
+            if char:
+                to_upsert.append(auth.CanvasTile(g_x=g_x, g_y=g_y, s_x=s_x, s_y=s_y, char=char, user_id=user_id))
+            else:
+                to_delete.append((g_x, g_y, s_x, s_y))
+        try:
+            await auth.save_tiles(to_upsert)
+            await auth.delete_tiles(to_delete)
+        except Exception as exc:
+            print(f"Warning: failed to flush {len(dirty)} dirty tiles: {exc}")
+            self._dirty_tiles.update(dirty)
 
 
 class CalasciiRouter(FastAPI):
@@ -151,7 +124,7 @@ class _UpdatePacketGet(TypedDict):
 async def _save_loop() -> None:
     while True:
         await asyncio.sleep(SAVE_INTERVAL)
-        app.data.save(SAVE_PATH)
+        await app.data.flush_dirty()
 
 
 def _build_user_colors(chunk_data: list[list[tuple[str, str | None]]]) -> dict[str, str]:
@@ -246,14 +219,14 @@ async def _broadcast_loop() -> None:
 
 @asynccontextmanager
 async def lifecycle(app: CalasciiRouter):
-    asyncio.create_task(auth.init_db())
-    app.data.load(SAVE_PATH)
+    await auth.init_db()
+    await app.data.load_from_db()
     save_task = asyncio.create_task(_save_loop())
     broadcast_task = asyncio.create_task(_broadcast_loop())
     yield
     save_task.cancel()
     broadcast_task.cancel()
-    app.data.save(SAVE_PATH)
+    await app.data.flush_dirty()
     await auth.close_db()
 
 

@@ -2,6 +2,7 @@ import os
 import random
 import time
 import uuid
+from typing import TypedDict
 from urllib.parse import urlencode
 
 import aiomysql
@@ -10,6 +11,15 @@ import jwt
 from dotenv import load_dotenv
 
 __all__: tuple[str, ...] = ()
+
+
+class CanvasTile(TypedDict):
+    g_x: int
+    g_y: int
+    s_x: int
+    s_y: int
+    char: str
+    user_id: str | None
 
 
 load_dotenv()
@@ -54,6 +64,21 @@ async def init_db() -> None:
     assert _pool is not None
     async with _pool.acquire() as conn:
         async with conn.cursor() as cur:
+            await cur.execute("""
+                CREATE TABLE IF NOT EXISTS canvas_tiles (
+                    g_x INT NOT NULL,
+                    g_y INT NOT NULL,
+                    s_x TINYINT UNSIGNED NOT NULL,
+                    s_y TINYINT UNSIGNED NOT NULL,
+                    `char` VARCHAR(8) CHARACTER SET utf8mb4 NOT NULL DEFAULT '',
+                    user_id VARCHAR(40),
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                        ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (g_x, g_y, s_x, s_y),
+                    INDEX idx_chunk (g_x, g_y),
+                    INDEX idx_user_id (user_id)
+                ) CHARACTER SET utf8mb4
+            """)
             await cur.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     id CHAR(36) NOT NULL,
@@ -245,6 +270,52 @@ async def exchange_code(code: str) -> dict | None:
         if resp.status_code != 200:
             return None
         return resp.json()
+
+
+async def save_tiles(tiles: list[CanvasTile]) -> None:
+    """Upsert non-empty canvas tiles into the database."""
+    if _pool is None or not tiles:
+        return
+    rows = [
+        (t["g_x"], t["g_y"], t["s_x"], t["s_y"], t["char"], t["user_id"])
+        for t in tiles
+    ]
+    async with _pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.executemany(
+                """INSERT INTO canvas_tiles (g_x, g_y, s_x, s_y, `char`, user_id)
+                   VALUES (%s, %s, %s, %s, %s, %s)
+                   ON DUPLICATE KEY UPDATE `char` = VALUES(`char`), user_id = VALUES(user_id)""",
+                rows,
+            )
+
+
+async def delete_tiles(coords: list[tuple[int, int, int, int]]) -> None:
+    """Delete canvas tiles at the given (g_x, g_y, s_x, s_y) coordinates."""
+    if _pool is None or not coords:
+        return
+    async with _pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.executemany(
+                "DELETE FROM canvas_tiles WHERE g_x=%s AND g_y=%s AND s_x=%s AND s_y=%s",
+                coords,
+            )
+
+
+async def load_all_tiles() -> list[CanvasTile]:
+    """Load all non-empty canvas tiles from the database."""
+    if _pool is None:
+        return []
+    async with _pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT g_x, g_y, s_x, s_y, `char`, user_id"
+                " FROM canvas_tiles WHERE `char` != ''"
+            )
+            return [
+                CanvasTile(g_x=r[0], g_y=r[1], s_x=r[2], s_y=r[3], char=r[4], user_id=r[5])
+                for r in await cur.fetchall()
+            ]
 
 
 async def get_discord_user(access_token: str) -> dict | None:
