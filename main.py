@@ -317,8 +317,8 @@ async def process_message(message: Message, websocket: WebSocket) -> None:
         await websocket.send_json(await _build_chunk_packet(message["g_x"], message["g_y"], chunk_data))
 
 
-async def _dispatch_account_update(client_id: str, username: str, color: str) -> None:
-    packet = {"type": "account_update", "id": client_id, "username": username, "color": color}
+async def _dispatch_account_update(client_id: str, username: str, color: str, user_id: str | None = None) -> None:
+    packet = {"type": "account_update", "id": client_id, "username": username, "color": color, "user_id": user_id}
     for client in list(app.connected_clients):
         try:
             await client.send_json(packet)
@@ -500,7 +500,7 @@ async def change_username(request: Request):
     app.sub_to_username[payload["sub"]] = new_username
     for client_id in _find_client_ids_by_user_id(payload["sub"]):
         app.id_to_username[client_id] = new_username
-        asyncio.create_task(_dispatch_account_update(client_id, new_username, color))
+        asyncio.create_task(_dispatch_account_update(client_id, new_username, color, "u:" + payload["sub"]))
 
     new_token = auth.create_jwt(user_id=payload["sub"], username=new_username, cursor_color=color)
     response = JSONResponse({"username": new_username, "cursor_color": color})
@@ -536,7 +536,7 @@ async def change_color(request: Request):
     app.sub_to_color[payload["sub"]] = new_color
     for client_id in _find_client_ids_by_user_id(payload["sub"]):
         app.id_to_color[client_id] = new_color
-        asyncio.create_task(_dispatch_account_update(client_id, app.id_to_username.get(client_id, ""), new_color))
+        asyncio.create_task(_dispatch_account_update(client_id, app.id_to_username.get(client_id, ""), new_color, "u:" + payload["sub"]))
 
     new_token = auth.create_jwt(
         user_id=payload["sub"],
