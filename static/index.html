@@ -802,6 +802,28 @@
         if (cursor) sendCursorMove(cursor.wx, cursor.wy);
       });
 
+      window.addEventListener('paste', (e) => {
+        if (!cursor) return;
+        const text = (e.clipboardData || window.clipboardData).getData('text');
+        if (text) {
+          const cursorStartX = cursor.wx;
+          for (const ch of text) {
+            if (ch.length === 1) {
+              if (ch === '\n') {
+                cursor = { wx: cursorStartX, wy: cursor.wy + 1 };
+              }  else {
+                sendSet(cursor.wx, cursor.wy, ch);
+                cursor = { wx: cursor.wx + 1, wy: cursor.wy };
+              }
+            }
+          }
+          moveCursorToBounded(cursor.wx, cursor.wy);
+          resetBlink();
+          ensureCursorVisible();
+          sendCursorMove(cursor.wx, cursor.wy);
+        }
+      });
+
       mobileInput.addEventListener('input', (e) => {
         if (!cursor || !e.data) { mobileInput.value = ''; return; }
         for (const ch of e.data) {
