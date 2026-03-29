@@ -5,7 +5,7 @@ import secrets
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Final, Literal, TypedDict
+from typing import Any, Final, Literal, TypedDict
 
 import auth
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -24,40 +24,75 @@ BROADCAST_INTERVAL: Final[int] = 1  # seconds
 
 class CalasciiData:
     def __init__(self) -> None:
-        self._data: dict[int, dict[int, list[list[str]]]] = {}
+        self._data: dict[int, dict[int, list[list[tuple[str, str | None]]]]] = {}
 
-    def _ensure_chunk(self, g_x: int, g_y: int) -> list[list[str]]:
+    def _ensure_chunk(self, g_x: int, g_y: int) -> list[list[tuple[str, str | None]]]:
         if g_x not in self._data:
             self._data[g_x] = {}
         if g_y not in self._data[g_x]:
             self._data[g_x][g_y] = [
-                ["" for _ in range(CHUNK_SIZE)]
+                [("", None) for _ in range(CHUNK_SIZE)]
                 for _ in range(CHUNK_SIZE)
             ]
         return self._data[g_x][g_y]
 
-    def set(self, g_x: int, g_y: int, s_x: int, s_y: int, data: str) -> None:
-        self._ensure_chunk(g_x, g_y)[s_x][s_y] = data
+    def set(self, g_x: int, g_y: int, s_x: int, s_y: int, data: str, user_id: str | None) -> None:
+        self._ensure_chunk(g_x, g_y)[s_x][s_y] = (data, user_id)
 
-    def get(self, g_x: int, g_y: int) -> list[list[str]]:
+    def get(self, g_x: int, g_y: int) -> list[list[tuple[str, str | None]]]:
         return self._ensure_chunk(g_x, g_y)
 
+    DATA_VERSION: Final[int] = 2
+
     def save(self, path: Path) -> None:
-        serialized = {
-            str(g_x): {str(g_y): chunk for g_y, chunk in cols.items()}
-            for g_x, cols in self._data.items()
+        serialized: dict[str, Any] = {
+            "version": self.DATA_VERSION,
+            "chunks": {
+                str(g_x): {str(g_y): chunk for g_y, chunk in cols.items()}
+                for g_x, cols in self._data.items()
+            },
         }
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(serialized))
         tmp.replace(path)
 
+    def _migrate(self, raw: dict[str, Any]) -> dict[str, dict[str, list[list[tuple[str, str | None]]]]]:
+        version: int = raw.get("version", 0)
+        raw_chunks: dict[str, Any] = raw.get("chunks", raw) if version >= 1 else raw
+
+        result: dict[str, dict[str, list[list[tuple[str, str | None]]]]] = {}
+        for g_x, cols in raw_chunks.items():
+            result[g_x] = {}
+            for g_y, chunk in cols.items():
+                migrated: list[list[tuple[str, str | None]]] = []
+                for col in chunk:
+                    migrated_col: list[tuple[str, str | None]] = []
+                    for cell in col:
+                        if isinstance(cell, str):
+                            # v0: plain string cell, no ownership
+                            migrated_col.append((cell, None))
+                        elif isinstance(cell, list) and len(cell) == 2:
+                            char: str = cell[0] or ""
+                            uid: str | None = cell[1]
+                            # v1: user_id was a raw session UUID, not a stable sub —
+                            # only keep ids already in the "u:..." format (v2+)
+                            if version < 2 and uid and not uid.startswith("u:"):
+                                uid = None
+                            migrated_col.append((char, uid))
+                        else:
+                            migrated_col.append(("", None))
+                    migrated.append(migrated_col)
+                result[g_x][g_y] = migrated
+        return result
+
     def load(self, path: Path) -> None:
         if not path.exists():
             return
         raw = json.loads(path.read_text())
+        clean = self._migrate(raw)
         self._data = {
             int(g_x): {int(g_y): chunk for g_y, chunk in cols.items()}
-            for g_x, cols in raw.items()
+            for g_x, cols in clean.items()
         }
 
 
@@ -67,6 +102,7 @@ class CalasciiRouter(FastAPI):
     client_users: dict[WebSocket, dict | None] = {}
     id_to_username: dict[str, str] = {}
     id_to_color: dict[str, str] = {}
+    sub_to_color: dict[str, str] = {}
     cursors: dict[str, tuple[int, int] | None] = {}
     data: CalasciiData = CalasciiData()
     pending_chunks: set[tuple[int, int]] = set()
@@ -106,13 +142,26 @@ class _UpdatePacketGet(TypedDict):
     type: Literal["update_packet_get"]
     g_x: int
     g_y: int
-    data: list[list[str]]
+    data: list[list[tuple[str, str | None]]]
+    user_colors: dict[str, str]
 
 
 async def _save_loop() -> None:
     while True:
         await asyncio.sleep(SAVE_INTERVAL)
         app.data.save(SAVE_PATH)
+
+
+def _build_user_colors(chunk_data: list[list[tuple[str, str | None]]]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for col in chunk_data:
+        for (_, uid) in col:
+            if uid and uid not in result:
+                sub = uid[2:] if uid.startswith("u:") else uid
+                color = app.sub_to_color.get(sub)
+                if color:
+                    result[uid] = color
+    return result
 
 
 async def _broadcast_loop() -> None:
@@ -123,11 +172,13 @@ async def _broadcast_loop() -> None:
             chunks_snapshot = app.pending_chunks.copy()
             app.pending_chunks.clear()
             for (g_x, g_y) in chunks_snapshot:
+                chunk_data = app.data.get(g_x=g_x, g_y=g_y)
                 packet = _UpdatePacketGet({
                     "type": "update_packet_get",
                     "g_x": g_x,
                     "g_y": g_y,
-                    "data": app.data.get(g_x=g_x, g_y=g_y),
+                    "data": chunk_data,
+                    "user_colors": _build_user_colors(chunk_data),
                 })
                 for client, subscribed in app.connected_clients.items():
                     if (g_x, g_y) in subscribed:
@@ -176,7 +227,8 @@ app = CalasciiRouter(
 
 async def process_message(message: Message, websocket: WebSocket) -> None:
     if message["type"] == "set":
-        if not auth.NO_AUTH and app.client_users.get(websocket) is None:
+        user_payload = app.client_users.get(websocket)
+        if not auth.NO_AUTH and user_payload is None:
             return
         if (
             app.connected_clients.get(websocket) is None
@@ -185,12 +237,20 @@ async def process_message(message: Message, websocket: WebSocket) -> None:
             return
         if not (0 <= message["s_x"] < CHUNK_SIZE and 0 <= message["s_y"] < CHUNK_SIZE):
             return
+        effective_user_id = ("u:" + user_payload["sub"]) if user_payload else None
+        if not auth.NO_AUTH and effective_user_id:
+            existing = app.data.get(g_x=message["g_x"], g_y=message["g_y"])[message["s_x"]][message["s_y"]]
+            existing_owner = existing[1]
+            if existing_owner and existing_owner.startswith("u:") and existing_owner != effective_user_id:
+                return
+        stored_user_id = effective_user_id if message["data"] else None
         app.data.set(
             g_x=message["g_x"],
             g_y=message["g_y"],
             s_x=message["s_x"],
             s_y=message["s_y"],
             data=message["data"],
+            user_id=stored_user_id,
         )
         app.pending_chunks.add((message["g_x"], message["g_y"]))
 
@@ -216,14 +276,13 @@ async def process_message(message: Message, websocket: WebSocket) -> None:
         chunk_key = (message["g_x"], message["g_y"])
         if chunk_key not in app.connected_clients[websocket]:
             app.connected_clients[websocket].append(chunk_key)
+        chunk_data = app.data.get(g_x=message["g_x"], g_y=message["g_y"])
         await websocket.send_json(_UpdatePacketGet({
             "type": "update_packet_get",
             "g_x": message["g_x"],
             "g_y": message["g_y"],
-            "data": app.data.get(
-                g_x=message["g_x"],
-                g_y=message["g_y"],
-            ),
+            "data": chunk_data,
+            "user_colors": _build_user_colors(chunk_data),
         }))
 
 
@@ -264,10 +323,13 @@ async def websocket_endpoint(websocket: WebSocket):
     app.id_to_username[client_id] = username
     app.id_to_color[client_id] = cursor_color
     app.cursors[client_id] = None
+    if user_payload:
+        app.sub_to_color[user_payload["sub"]] = cursor_color
 
     await websocket.send_json({
         "type": "welcome",
         "id": client_id,
+        "my_user_id": ("u:" + user_payload["sub"]) if user_payload else None,
         "cursors": [
             {
                 "id": cid,
@@ -438,6 +500,7 @@ async def change_color(request: Request):
     except RuntimeError:
         pass
 
+    app.sub_to_color[payload["sub"]] = new_color
     for client_id in _find_client_ids_by_user_id(payload["sub"]):
         app.id_to_color[client_id] = new_color
         asyncio.create_task(_dispatch_account_update(client_id, app.id_to_username.get(client_id, ""), new_color))
