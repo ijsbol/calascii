@@ -284,6 +284,7 @@
       }
 
       let isAuthenticated = false;
+      let isAnonAuth = false;
       const hudAuth = document.getElementById('hud-auth');
       const authModal = document.getElementById('auth-modal');
 
@@ -360,9 +361,8 @@
           const resp = await fetch('/auth/me');
           const data = await resp.json();
           isAuthenticated = data.authenticated;
-          if (data.no_auth) {
-            hudAuth.style.display = 'none';
-          } else if (isAuthenticated) {
+          isAnonAuth = data.no_auth;
+          if (isAuthenticated || isAnonAuth) {
             myCursorColor = data.cursor_color || CURSOR_COLORS[0];
             renderUsername(data.username, myCursorColor);
           } else {

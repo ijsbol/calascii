@@ -379,7 +379,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
     # Register socket for tile allowance tracking
     tile_allowance_packet: dict | None = None
-    if user_payload:
+    if user_payload and not auth.NO_AUTH:
         sub = user_payload["sub"]
         if sub not in app.user_id_to_sockets:
             app.user_id_to_sockets[sub] = set()
@@ -508,19 +508,32 @@ async def logout():
 
 @app.get("/auth/me")
 async def me(request: Request):
-    if auth.NO_AUTH:
-        return JSONResponse({"authenticated": True, "no_auth": True})
     token = request.cookies.get("session")
     if not token:
-        return JSONResponse({"authenticated": False})
+        # Give users an automatic anonymous identity if NO_AUTH is enabled
+        if auth.NO_AUTH:
+            random_id = secrets.token_hex(4)
+            random_username = "Anon" + random_id
+            random_color = random.choice(auth.CURSOR_COLORS)
+            token = auth.create_jwt(user_id=random_id, username=random_username, cursor_color=random_color)
+        else:
+            return JSONResponse({"authenticated": False})
     payload = auth.decode_jwt(token)
     if not payload:
         return JSONResponse({"authenticated": False})
-    return JSONResponse({
+    response = JSONResponse({
         "authenticated": True,
         "username": payload["username"],
         "cursor_color": payload.get("cursor_color", auth.CURSOR_COLORS[0]),
     })
+    response.set_cookie(
+        "session",
+        token,
+        max_age=auth.JWT_EXPIRY_SECONDS,
+        httponly=True,
+        samesite="lax",
+    )
+    return response
 
 
 @app.post("/auth/username")
