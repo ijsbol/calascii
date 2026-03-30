@@ -36,11 +36,19 @@
       #hud-tiles.visible { display: block; }
       #hud-tiles.at-limit { color: #6a3030; }
 
-      #hud-unclaimed { display: none; align-items: center; gap: 6px; pointer-events: auto; margin-top: 2px; }
-      #hud-unclaimed.visible { display: flex; }
-      #hud-unclaimed label { cursor: pointer; opacity: 0.6; transition: opacity 0.2s, color 0.2s; }
-      #hud-unclaimed:hover label { opacity: 1; color: #6a8aaa; }
-      #hud-unclaimed input { cursor: pointer; margin: 0; }
+      #hud-unclaimed { display: none; pointer-events: auto; margin-top: 2px; }
+      #hud-unclaimed.visible { display: block; }
+      #unclaimed-checkbox { display: none; }
+      #hud-unclaimed label { 
+        cursor: pointer; 
+        color: #3d4a5c; 
+        transition: color 0.2s; 
+        letter-spacing: 1px; 
+        user-select: none;
+      }
+      #hud-unclaimed:hover label { color: #6a8aaa; }
+      #unclaimed-label-box::before { content: "[ ] "; }
+      #unclaimed-checkbox:checked + label #unclaimed-label-box::before { content: "[x] "; }
 
       #hud-auth { pointer-events: auto; }
       #hud-auth a {
@@ -218,7 +226,7 @@
         <div id="hud-colors"></div>
         <div id="hud-unclaimed">
           <input type="checkbox" id="unclaimed-checkbox">
-          <label for="unclaimed-checkbox">write unclaimed</label>
+          <label for="unclaimed-checkbox"><span id="unclaimed-label-box"></span>write unclaimed</label>
         </div>
         <div id="hud-tiles"></div>
         <div id="hud-help">drag to pan &nbsp; click to place cursor &nbsp; type to write</div>
