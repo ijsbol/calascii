@@ -36,6 +36,20 @@
       #hud-tiles.visible { display: block; }
       #hud-tiles.at-limit { color: #6a3030; }
 
+      #hud-unclaimed { display: none; pointer-events: auto; margin-top: 2px; }
+      #hud-unclaimed.visible { display: block; }
+      #unclaimed-checkbox { display: none; }
+      #hud-unclaimed label { 
+        cursor: pointer; 
+        color: #3d4a5c; 
+        transition: color 0.2s; 
+        letter-spacing: 1px; 
+        user-select: none;
+      }
+      #hud-unclaimed:hover label { color: #6a8aaa; }
+      #unclaimed-label-box::before { content: "[ ] "; }
+      #unclaimed-checkbox:checked + label #unclaimed-label-box::before { content: "[x] "; }
+
       #hud-auth { pointer-events: auto; }
       #hud-auth a {
         color: #3d4a5c;
@@ -210,6 +224,10 @@
         <div id="hud-status" class="disconnected">connecting</div>
         <div id="hud-auth"></div>
         <div id="hud-colors"></div>
+        <div id="hud-unclaimed">
+          <input type="checkbox" id="unclaimed-checkbox">
+          <label for="unclaimed-checkbox"><span id="unclaimed-label-box"></span>write unclaimed</label>
+        </div>
         <div id="hud-tiles"></div>
         <div id="hud-help">drag to pan &nbsp; click to place cursor &nbsp; type to write</div>
       </div>
@@ -362,6 +380,9 @@
           if (isAuthenticated || isAnonAuth) {
             myCursorColor = data.cursor_color || CURSOR_COLORS[0];
             renderUsername(data.username, myCursorColor);
+            if (isAuthenticated && !isAnonAuth) {
+              document.getElementById('hud-unclaimed').classList.add('visible');
+            }
           } else {
             hudAuth.innerHTML = `<a href="/auth/discord/login">login</a>`;
           }
@@ -442,6 +463,8 @@
         if (!Array.isArray(cell)) return true;
         const existingOwner = cell[1];
         if (!existingOwner || !existingOwner.startsWith('u:')) return true;
+        const isUnclaimed = document.getElementById('unclaimed-checkbox').checked;
+        if (isUnclaimed) return false;
         return existingOwner === myUserId;
       }
 
@@ -452,7 +475,8 @@
         }
         if (!canWrite(wx, wy)) return;
         const { gx, gy, sx, sy } = worldToChunk(wx, wy);
-        if (ch && myUserId) {
+        const isUnclaimed = document.getElementById('unclaimed-checkbox').checked;
+        if (ch && myUserId && !isUnclaimed) {
           const existingCell = chunks.get(`${gx},${gy}`)?.[sx]?.[sy];
           const existingOwner = Array.isArray(existingCell) ? existingCell[1] : null;
           if ((!existingOwner || !existingOwner.startsWith('u:')) && myTileClaimed >= myTileAllowance) return;
@@ -461,10 +485,10 @@
         if (!chunks.has(key)) {
           chunks.set(key, Array.from({ length: CHUNK_SIZE }, () => Array.from({ length: CHUNK_SIZE }, () => ['', null])));
         }
-        chunks.get(key)[sx][sy] = ch ? [ch, myUserId] : ['', null];
+        chunks.get(key)[sx][sy] = ch ? [ch, myUserId && !isUnclaimed ? myUserId : null] : ['', null];
         if (!ws || ws.readyState !== WebSocket.OPEN) return;
         requestChunk(gx, gy);
-        ws.send(JSON.stringify({ type: 'set', g_x: gx, g_y: gy, s_x: sx, s_y: sy, data: ch }));
+        ws.send(JSON.stringify({ type: 'set', g_x: gx, g_y: gy, s_x: sx, s_y: sy, data: ch, unclaimed: isUnclaimed }));
       }
 
       function sendCursorMove(wx, wy) {
