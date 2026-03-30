@@ -264,15 +264,17 @@ async def process_message(message: Message, websocket: WebSocket) -> None:
             return
         if not (0 <= message["s_x"] < CHUNK_SIZE and 0 <= message["s_y"] < CHUNK_SIZE):
             return
-        effective_user_id = ("u:" + user_payload["sub"]) if user_payload else None
+        real_user_id = ("u:" + user_payload["sub"]) if user_payload else None
+        effective_user_id = None if message.get("unclaimed") else real_user_id
+
         existing_owner: str | None = None
-        if not auth.NO_AUTH and effective_user_id:
+        if not auth.NO_AUTH:
             existing = app.data.get(g_x=message["g_x"], g_y=message["g_y"])[message["s_x"]][message["s_y"]]
             existing_owner = existing[1]
             if existing_owner and existing_owner.startswith("u:") and existing_owner != effective_user_id:
                 return
             # Enforce tile allowance for new claims
-            if message["data"] and existing_owner is None:
+            if effective_user_id and message["data"] and existing_owner is None:
                 sub = effective_user_id[2:]  # strip "u:" prefix
                 claimed = app.user_id_to_claimed.get(sub, 0)
                 allowance = app.user_id_to_allowance.get(sub, 100)
